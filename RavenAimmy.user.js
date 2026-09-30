@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Aimmy By Krem — Raven Edition
 // @namespace    https://github.com/kremityss/Aimmy-By-Krem
-// @version      1.0.1
+// @version      1.1.0
 // @description  Raven-branded local vision/control dashboard for Xbox Cloud Gaming with desktop, touch, controller, and optional ESP32-S3 support.
 // @author       Kremityss
 // @match        https://www.xbox.com/*/play/*
@@ -14,14 +14,15 @@
 (() => {
   'use strict';
 
-  const BUILD = '1.0.1';
+  const BUILD = '1.1.0';
   const NS = '__RAVEN_AIMMY__';
   if (window[NS]?.destroy) window[NS].destroy();
 
   const CDN = {
     tf: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
     webgpu: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js',
-    pose: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js'
+    pose: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js',
+    ort: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.min.js'
   };
 
   const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
@@ -40,11 +41,11 @@
 
   class RavenStore {
     constructor() {
-      this.key = 'ravenAimmy.v1';
+      this.key = 'ravenAimmy.v2';
       this.defaults = {
-        ui: { open: true, scale: 1, opacity: .96, compactHud: true },
+        ui: { open: true, scale: 1, opacity: .96, compactHud: true, autoScale: true },
         aim: {
-          enabled: false,
+          enabled: true,
           activation: 'hold',
           activationKey: 'MouseRight',
           controllerButton: 6,
@@ -61,33 +62,40 @@
         },
         vision: {
           enabled: true,
+          engine: 'auto',
           model: 'lightning',
+          yoloUrl: '',
+          yoloConfidence: .32,
+          yoloIou: .45,
+          yoloInputSize: 640,
           backend: 'auto',
-          minScore: .24,
-          keypointScore: .22,
-          intervalMs: 0,
+          minScore: .16,
+          keypointScore: .16,
+          intervalMs: 12,
           maxPoses: 1,
           crop: 'video',
           adaptive: true,
-          targetFps: 45
+          targetFps: 24
         },
         visuals: {
           enabled: true,
           boxes: true,
-          skeleton: true,
+          skeleton: false,
           tracers: false,
           keypoints: false,
           fov: true,
           targetLine: true,
-          rgb: true,
+          rgb: false,
           lineWidth: 1.5,
           hud: true
         },
         input: {
-          adapter: 'pointer',
+          adapter: 'auto',
           mouseGain: 1,
           controllerGain: 1,
-          touchGain: 1,
+          touchGain: .85,
+          mobileTouch: true,
+          touchAssistStrength: .72,
           invertY: false
         },
         esp32: {
@@ -100,7 +108,7 @@
         perf: {
           highPerformance: true,
           suspendWhenHidden: true,
-          overlayFps: 60,
+          overlayFps: 30,
           renderEveryDetection: false,
           preferLowPower: false
         }
@@ -134,11 +142,15 @@
       const touch = navigator.maxTouchPoints > 0;
       const memory = navigator.deviceMemory || null;
       const cores = navigator.hardwareConcurrency || null;
-      const screenInfo = `${screen.width}×${screen.height} @${window.devicePixelRatio.toFixed(2)}x`;
+      const viewportWidth = Math.max(1, window.innerWidth || screen.width);
+      const viewportHeight = Math.max(1, window.innerHeight || screen.height);
+      const shortSide = Math.min(viewportWidth, viewportHeight);
+      const orientation = viewportWidth >= viewportHeight ? 'landscape' : 'portrait';
+      const screenInfo = `${screen.width}×${screen.height} @${window.devicePixelRatio.toFixed(2)}x • ${orientation}`;
       const gpu = await DeviceProfile.gpuName();
       return {
         ua, platform, mobile, ios, android, chromeOS, windows, touch, memory, cores, gpu,
-        screenInfo,
+        viewportWidth, viewportHeight, shortSide, orientation, screenInfo,
         webgpu: !!navigator.gpu,
         gamepad: 'getGamepads' in navigator,
         pointer: 'PointerEvent' in window,
@@ -182,7 +194,17 @@
       await this.loadScript(CDN.tf, () => !!window.tf);
       try { await this.loadScript(CDN.webgpu, () => !!window.tf?.findBackend?.('webgpu')); } catch {}
       await this.loadScript(CDN.pose, () => !!window.poseDetection);
-      this.log('Vision libraries ready');
+      this.log('Pose runtime ready');
+    }
+    async ensureOrt() {
+      if (window.ort) return;
+      this.log('Loading ONNX Runtime Web');
+      await this.loadScript(CDN.ort, () => !!window.ort);
+      try {
+        ort.env.wasm.numThreads = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
+        ort.env.wasm.simd = true;
+      } catch {}
+      this.log('ONNX runtime ready');
     }
   }
 
