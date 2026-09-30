@@ -578,7 +578,7 @@
       const tabs=['Dashboard','Aim','Vision','Visuals','Input','ESP32-S3','Performance','Device','Settings'];
       const nav=this.shadow.querySelector('nav');
       const short=['HOME','AIM','AI','VIS','IN','S3','FPS','DEV','SET'];
-      tabs.forEach((t,i)=>{const b=document.createElement('button');b.textContent=t;b.dataset.short=short[i];b.className=i===0?'active':'';b.onclick=()=>{this.activeTab=t;$('nav button',this.shadow).forEach(x=>x.classList.toggle('active',x===b));this.render();};nav.appendChild(b);});
+      tabs.forEach((t,i)=>{const b=document.createElement('button');b.textContent=t;b.dataset.short=short[i];b.className=i===0?'active':'';b.onclick=()=>{this.activeTab=t;$$('nav button',this.shadow).forEach(x=>x.classList.toggle('active',x===b));this.render();};nav.appendChild(b);});
       this.drag(); this.render();
       this.statusTimer=setInterval(()=>this.renderStatus(),500);
     }
