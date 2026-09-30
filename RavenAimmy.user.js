@@ -211,6 +211,8 @@
       this.fpsAvg = new RingAverage(24);
       this.lastFinish = 0;
       this.frameCounter = 0;
+      this.prevAimPoint = null;
+      this.prevAimAt = 0;
     }
     async configureBackend() {
       const tf = window.tf;
@@ -302,7 +304,18 @@
         if (valid(a) && valid(b)) p = { x:(a.x+b.x)/2, y:(a.y+b.y)/2, score:Math.min(a.score,b.score) };
       }
       if (!p) return null;
-      return { x:p.x, y:p.y + aim.headOffset, score:p.score ?? 1 };
+      const point = { x:p.x, y:p.y + aim.headOffset, score:p.score ?? 1 };
+      const t = now();
+      const dt = t - this.prevAimAt;
+      if (this.prevAimPoint && dt > 0 && dt < 250 && aim.predictionMs > 0) {
+        const vx = (point.x - this.prevAimPoint.x) / dt;
+        const vy = (point.y - this.prevAimPoint.y) / dt;
+        point.x += vx * aim.predictionMs;
+        point.y += vy * aim.predictionMs;
+      }
+      this.prevAimPoint = { x:p.x, y:p.y + aim.headOffset };
+      this.prevAimAt = t;
+      return point;
     }
     get inferenceMs() { return this.inferAvg.value; }
     get modelFps() { return this.fpsAvg.value; }
@@ -353,6 +366,11 @@
       window.addEventListener('pointerup', this.up, true);
       window.addEventListener('keydown', this.down, true);
       window.addEventListener('keyup', this.up, true);
+    }
+    source() {
+      if (this.gpAim) return 'controller';
+      if (this.touchAim) return 'touch';
+      return 'mouse';
     }
     active() {
       const c = this.app.store.data.aim;
@@ -422,6 +440,10 @@
       const target = this.mapTarget(point); if (!target) return;
       const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
       let dx = target.x-cx, dy = target.y-cy;
+      const inputCfg = this.app.store.data.input;
+      const source = this.app.activation.source();
+      const gain = source === 'controller' ? inputCfg.controllerGain : source === 'touch' ? inputCfg.touchGain : inputCfg.mouseGain;
+      dx *= gain; dy *= gain;
       const dist = Math.hypot(dx,dy);
       const cfg = this.app.store.data.aim;
       if (dist > cfg.fov || dist < cfg.deadzone) return;
@@ -450,8 +472,8 @@
         bubbles:true, cancelable:true, pointerType:'mouse', isPrimary:true,
         clientX: rect.left+rect.width/2+dx,
         clientY: rect.top+rect.height/2+dy,
-        movementX: Math.round(dx*this.app.store.data.input.mouseGain),
-        movementY: Math.round(dy*this.app.store.data.input.mouseGain)
+        movementX: Math.round(dx),
+        movementY: Math.round(dy)
       });
       el.dispatchEvent(evt);
     }
@@ -466,9 +488,10 @@
   }
 
   class RavenBridge {
-    constructor(app) { this.app=app; this.ws=null; this.connected=false; this.latency=null; this.lastPing=0; this.seq=0; this.lastAim=0; this.reconnectTimer=0; }
+    constructor(app) { this.app=app; this.ws=null; this.connected=false; this.latency=null; this.lastPing=0; this.seq=0; this.lastAim=0; this.reconnectTimer=0; this.generation=0; }
     connect() {
-      this.disconnect(false);
+      this.disconnect();
+      const generation = ++this.generation;
       if (!this.app.store.data.esp32.enabled) return;
       try {
         const ws = new WebSocket(this.app.store.data.esp32.url);
@@ -480,17 +503,15 @@
             if (m.type==='pong' && m.t) this.latency = now()-m.t;
           } catch {}
         };
-        ws.onclose = () => { this.connected=false; this.app.ui.renderStatus(); if (this.app.running && this.app.store.data.esp32.reconnect) this.reconnectTimer=setTimeout(()=>this.connect(),1800); };
+        ws.onclose = () => { if (generation !== this.generation) return; this.connected=false; this.app.ui.renderStatus(); if (this.app.running && this.app.store.data.esp32.reconnect) this.reconnectTimer=setTimeout(()=>this.connect(),1800); };
         ws.onerror = () => { this.connected=false; };
       } catch(e) { this.app.log(`ESP32 bridge: ${e.message}`); }
     }
-    disconnect(reconnect=false) {
+    disconnect() {
       clearTimeout(this.reconnectTimer);
-      const old = this.app.store.data.esp32.reconnect;
-      if (!reconnect) this.app.store.data.esp32.reconnect=false;
+      this.generation++;
       try { this.ws?.close(); } catch {}
       this.ws=null; this.connected=false;
-      if (!reconnect) this.app.store.data.esp32.reconnect=old;
     }
     send(obj) { if (this.connected && this.ws?.readyState===WebSocket.OPEN) this.ws.send(JSON.stringify(obj)); }
     ping() { const t=now(); this.lastPing=t; this.send({type:'ping',t}); }
@@ -556,7 +577,8 @@
       this.shadow.querySelector('.orb').onclick=()=>this.toggle(); this.shadow.querySelector('.min').onclick=()=>this.toggle();
       const tabs=['Dashboard','Aim','Vision','Visuals','Input','ESP32-S3','Performance','Device','Settings'];
       const nav=this.shadow.querySelector('nav');
-      tabs.forEach((t,i)=>{const b=document.createElement('button');b.textContent=t;b.className=i===0?'active':'';b.onclick=()=>{this.activeTab=t;$$('nav button',this.shadow).forEach(x=>x.classList.toggle('active',x===b));this.render();};nav.appendChild(b);});
+      const short=['HOME','AIM','AI','VIS','IN','S3','FPS','DEV','SET'];
+      tabs.forEach((t,i)=>{const b=document.createElement('button');b.textContent=t;b.dataset.short=short[i];b.className=i===0?'active':'';b.onclick=()=>{this.activeTab=t;$('nav button',this.shadow).forEach(x=>x.classList.toggle('active',x===b));this.render();};nav.appendChild(b);});
       this.drag(); this.render();
       this.statusTimer=setInterval(()=>this.renderStatus(),500);
     }
@@ -574,7 +596,7 @@
       if(this.activeTab==='Aim') c.innerHTML=`<div class="grid"><div class="card full"><h3>AIM ENGINE</h3>${toggle('aimEnabled','Enabled',s.aim.enabled)}${select('activation','Activation',s.aim.activation,[['hold','Hold input'],['toggle','Toggle (F8)'],['always','Always']])}${select('aimTarget','Aim point',s.aim.target,[['head','Head'],['chest','Chest'],['hip','Hip']])}${range('fov','FOV radius',s.aim.fov,40,380,1,' px')}${range('smooth','Smoothing',s.aim.smoothing,.02,1,.01,'')}${range('maxstep','Max step',s.aim.maxStep,2,80,1,' px')}${range('deadzone','Deadzone',s.aim.deadzone,0,20,.5,' px')}${range('pred','Prediction',s.aim.predictionMs,0,150,1,' ms')}</div></div>`;
       if(this.activeTab==='Vision') c.innerHTML=`<div class="grid"><div class="card full"><h3>LOCAL MODEL</h3>${toggle('visionEnabled','Vision engine',s.vision.enabled)}${select('model','Model',s.vision.model,[['lightning','MoveNet Lightning • fast'],['thunder','MoveNet Thunder • quality']])}${select('backend','Backend',s.vision.backend,[['auto','Auto • WebGPU first'],['webgpu','WebGPU'],['webgl','WebGL'],['cpu','CPU']])}${range('score','Minimum pose score',s.vision.minScore,.05,.9,.01,'')}${range('kpscore','Keypoint score',s.vision.keypointScore,.05,.9,.01,'')}${toggle('adaptive','Adaptive inference scheduler',s.vision.adaptive)}${range('targetfps','Target model FPS',s.vision.targetFps,10,120,1,' fps')}<div class="row"><button class="btn primary" id="reloadModel">RELOAD MODEL</button><span class="muted">${a.vision.modelName} • ${a.vision.backend}</span></div></div></div>`;
       if(this.activeTab==='Visuals') c.innerHTML=`<div class="grid"><div class="card full"><h3>OVERLAY</h3>${toggle('visualEnabled','Enabled',s.visuals.enabled)}${toggle('boxes','Corner boxes',s.visuals.boxes)}${toggle('skel','Skeleton',s.visuals.skeleton)}${toggle('points','Keypoints',s.visuals.keypoints)}${toggle('fovvis','FOV circle',s.visuals.fov)}${toggle('tline','Target line',s.visuals.targetLine)}${toggle('rgb','RGB accent',s.visuals.rgb)}${range('linewidth','Line width',s.visuals.lineWidth,.5,4,.1,' px')}</div></div>`;
-      if(this.activeTab==='Input') c.innerHTML=`<div class="grid"><div class="card full"><h3>INPUT ROUTER</h3>${select('adapter','Output adapter',s.input.adapter,[['auto','Auto'],['pointer','Browser pointer'],['esp32','ESP32-S3']])}${range('mousegain','Mouse gain',s.input.mouseGain,.1,3,.05,'×')}${range('controllergain','Controller gain',s.input.controllerGain,.1,3,.05,'×')}${range('touchgain','Touch gain',s.input.touchGain,.1,3,.05,'×')}${toggle('invertY','Invert Y',s.input.invertY)}<div class="statline"><span>Detected controller</span><span>${a.controllerName}</span></div><div class="statline"><span>Touch</span><span>${a.device.touch?'Yes':'No'}</span></div><div class="muted">Activation supports right mouse hold, controller trigger button index ${s.aim.controllerButton}, touch hold on the right side, F8 toggle, or always-on mode.</div></div></div>`;
+      if(this.activeTab==='Input') c.innerHTML=`<div class="grid"><div class="card full"><h3>INPUT ROUTER</h3>${select('adapter','Output adapter',s.input.adapter,[['auto','Auto'],['pointer','Browser pointer'],['esp32','ESP32-S3']])}${range('mousegain','Mouse gain',s.input.mouseGain,.1,3,.05,'×')}${range('controllergain','Controller gain',s.input.controllerGain,.1,3,.05,'×')}${range('touchgain','Touch gain',s.input.touchGain,.1,3,.05,'×')}${toggle('invertY','Invert Y',s.input.invertY)}${toggle('touchHold','Touch hold activation',s.aim.touchHold)}${range('controllerbtn','Controller aim button',s.aim.controllerButton,0,16,1,'') }<div class="statline"><span>Detected controller</span><span>${a.controllerName}</span></div><div class="statline"><span>Touch</span><span>${a.device.touch?'Yes':'No'}</span></div><div class="muted">Activation supports right mouse hold, controller trigger button index ${s.aim.controllerButton}, touch hold on the right side, F8 toggle, or always-on mode.</div></div></div>`;
       if(this.activeTab==='ESP32-S3') c.innerHTML=`<div class="grid"><div class="card full"><h3>RAVENLINK</h3>${toggle('espEnabled','Enable bridge',s.esp32.enabled)}<div class="row"><label>WebSocket URL</label><input id="espurl" type="text" value="${s.esp32.url}"></div>${range('esphz','Send rate',s.esp32.sendHz,20,240,1,' Hz')}<div class="row"><button class="btn primary" id="espConnect">CONNECT</button><button class="btn" id="espPing">PING</button><span class="muted">${a.bridge.connected?'ONLINE':'OFFLINE'}${a.bridge.latency!=null?` • ${a.bridge.latency.toFixed(1)} ms`:''}</span></div><div class="muted">Wi-Fi/WebSocket is the portable browser path. iOS browsers do not expose the same USB/BLE browser APIs as desktop Chromium, so RavenLink uses network transport here.</div></div></div>`;
       if(this.activeTab==='Performance') c.innerHTML=`<div class="grid"><div class="card full"><h3>PERFORMANCE POLICY</h3>${toggle('highperf','High performance',s.perf.highPerformance)}${toggle('suspend','Suspend inference when hidden',s.perf.suspendWhenHidden)}${toggle('adaptive2','Adaptive scheduler',s.vision.adaptive)}${range('overlayfps','Overlay FPS cap',s.perf.overlayFps,15,120,1,' fps')}<div class="statline"><span>Tensor backend</span><span>${a.vision.backend}</span></div><div class="statline"><span>Model FPS</span><span>${a.vision.modelFps.toFixed(1)}</span></div><div class="statline"><span>Inference</span><span>${a.vision.inferenceMs.toFixed(1)} ms</span></div><div class="statline"><span>Render FPS</span><span>${a.metrics.renderFps.toFixed(0)}</span></div></div></div>`;
       if(this.activeTab==='Device') c.innerHTML=`<div class="grid"><div class="card full"><h3>DEVICE DETECTION</h3>${Object.entries({Platform:a.device.label,CPU:`${a.device.cores??'Unknown'} logical cores`,Memory:a.device.memory?`${a.device.memory} GB hint`:'Unavailable',GPU:a.device.gpu,Screen:a.device.screenInfo,WebGPU:a.device.webgpu?'Supported':'Unavailable',Touch:a.device.touch?'Supported':'No',GamepadAPI:a.device.gamepad?'Supported':'Unavailable',VideoFrameCallback:a.device.rvfc?'Supported':'Unavailable'}).map(([k,v])=>`<div class="statline"><span>${k}</span><span>${v}</span></div>`).join('')}</div></div>`;
@@ -582,8 +604,8 @@
       this.bindCurrent(); this.renderStatus();
     }
     bindCurrent(){const s=this.app.store.data;
-      [['masterAim',s.aim,'enabled'],['aimEnabled',s.aim,'enabled'],['masterVision',s.vision,'enabled'],['visionEnabled',s.vision,'enabled'],['masterVisuals',s.visuals,'enabled'],['visualEnabled',s.visuals,'enabled'],['adaptive',s.vision,'adaptive'],['adaptive2',s.vision,'adaptive'],['boxes',s.visuals,'boxes'],['skel',s.visuals,'skeleton'],['points',s.visuals,'keypoints'],['fovvis',s.visuals,'fov'],['tline',s.visuals,'targetLine'],['rgb',s.visuals,'rgb'],['invertY',s.input,'invertY'],['espEnabled',s.esp32,'enabled'],['highperf',s.perf,'highPerformance'],['suspend',s.perf,'suspendWhenHidden']].forEach(x=>this.bindToggle(...x,x[0]==='espEnabled'?v=>v?this.app.bridge.connect():this.app.bridge.disconnect():null));
-      [['fov',s.aim,'fov',v=>`${v|0} px`],['smooth',s.aim,'smoothing',v=>v.toFixed(2)],['maxstep',s.aim,'maxStep',v=>`${v|0} px`],['deadzone',s.aim,'deadzone',v=>`${v.toFixed(1)} px`],['pred',s.aim,'predictionMs',v=>`${v|0} ms`],['score',s.vision,'minScore',v=>v.toFixed(2)],['kpscore',s.vision,'keypointScore',v=>v.toFixed(2)],['targetfps',s.vision,'targetFps',v=>`${v|0} fps`],['linewidth',s.visuals,'lineWidth',v=>`${v.toFixed(1)} px`],['mousegain',s.input,'mouseGain',v=>`${v.toFixed(2)}×`],['controllergain',s.input,'controllerGain',v=>`${v.toFixed(2)}×`],['touchgain',s.input,'touchGain',v=>`${v.toFixed(2)}×`],['esphz',s.esp32,'sendHz',v=>`${v|0} Hz`],['overlayfps',s.perf,'overlayFps',v=>`${v|0} fps`]].forEach(x=>this.bindRange(...x));
+      [['masterAim',s.aim,'enabled'],['aimEnabled',s.aim,'enabled'],['masterVision',s.vision,'enabled'],['visionEnabled',s.vision,'enabled'],['masterVisuals',s.visuals,'enabled'],['visualEnabled',s.visuals,'enabled'],['adaptive',s.vision,'adaptive'],['adaptive2',s.vision,'adaptive'],['boxes',s.visuals,'boxes'],['skel',s.visuals,'skeleton'],['points',s.visuals,'keypoints'],['fovvis',s.visuals,'fov'],['tline',s.visuals,'targetLine'],['rgb',s.visuals,'rgb'],['invertY',s.input,'invertY'],['touchHold',s.aim,'touchHold'],['espEnabled',s.esp32,'enabled'],['highperf',s.perf,'highPerformance'],['suspend',s.perf,'suspendWhenHidden']].forEach(x=>this.bindToggle(...x,x[0]==='espEnabled'?v=>v?this.app.bridge.connect():this.app.bridge.disconnect():null));
+      [['fov',s.aim,'fov',v=>`${v|0} px`],['smooth',s.aim,'smoothing',v=>v.toFixed(2)],['maxstep',s.aim,'maxStep',v=>`${v|0} px`],['deadzone',s.aim,'deadzone',v=>`${v.toFixed(1)} px`],['pred',s.aim,'predictionMs',v=>`${v|0} ms`],['controllerbtn',s.aim,'controllerButton',v=>`${v|0}`],['score',s.vision,'minScore',v=>v.toFixed(2)],['kpscore',s.vision,'keypointScore',v=>v.toFixed(2)],['targetfps',s.vision,'targetFps',v=>`${v|0} fps`],['linewidth',s.visuals,'lineWidth',v=>`${v.toFixed(1)} px`],['mousegain',s.input,'mouseGain',v=>`${v.toFixed(2)}×`],['controllergain',s.input,'controllerGain',v=>`${v.toFixed(2)}×`],['touchgain',s.input,'touchGain',v=>`${v.toFixed(2)}×`],['esphz',s.esp32,'sendHz',v=>`${v|0} Hz`],['overlayfps',s.perf,'overlayFps',v=>`${v|0} fps`]].forEach(x=>this.bindRange(...x));
       this.bindSelect('activation',s.aim,'activation');this.bindSelect('aimTarget',s.aim,'target');this.bindSelect('adapter',s.input,'adapter');
       this.bindSelect('model',s.vision,'model',()=>this.app.vision.loadModel(true)); this.bindSelect('backend',s.vision,'backend',()=>this.app.vision.loadModel(true));
       const rm=this.shadow.getElementById('reloadModel');if(rm)rm.onclick=()=>this.app.vision.loadModel(true);
