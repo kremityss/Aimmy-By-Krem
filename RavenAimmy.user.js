@@ -458,3 +458,63 @@
     destroy() {
       cancelAnimationFrame(this.gamepadLoop);
       if (this._touchHandlers) {
+        window.removeEventListener('touchstart', this._touchHandlers[0], true);
+        window.removeEventListener('touchend', this._touchHandlers[1], true);
+        window.removeEventListener('touchcancel', this._touchHandlers[1], true);
+      }
+    }
+  }
+
+  class RavenBridge {
+    constructor(app) { this.app=app; this.ws=null; this.connected=false; this.latency=null; this.lastPing=0; this.seq=0; this.lastAim=0; this.reconnectTimer=0; }
+    connect() {
+      this.disconnect(false);
+      if (!this.app.store.data.esp32.enabled) return;
+      try {
+        const ws = new WebSocket(this.app.store.data.esp32.url);
+        this.ws = ws;
+        ws.onopen = () => { this.connected=true; this.app.toast('ESP32-S3 connected'); this.ping(); this.app.ui.renderStatus(); };
+        ws.onmessage = e => {
+          try {
+            const m=JSON.parse(e.data);
+            if (m.type==='pong' && m.t) this.latency = now()-m.t;
+          } catch {}
+        };
+        ws.onclose = () => { this.connected=false; this.app.ui.renderStatus(); if (this.app.running && this.app.store.data.esp32.reconnect) this.reconnectTimer=setTimeout(()=>this.connect(),1800); };
+        ws.onerror = () => { this.connected=false; };
+      } catch(e) { this.app.log(`ESP32 bridge: ${e.message}`); }
+    }
+    disconnect(reconnect=false) {
+      clearTimeout(this.reconnectTimer);
+      const old = this.app.store.data.esp32.reconnect;
+      if (!reconnect) this.app.store.data.esp32.reconnect=false;
+      try { this.ws?.close(); } catch {}
+      this.ws=null; this.connected=false;
+      if (!reconnect) this.app.store.data.esp32.reconnect=old;
+    }
+    send(obj) { if (this.connected && this.ws?.readyState===WebSocket.OPEN) this.ws.send(JSON.stringify(obj)); }
+    ping() { const t=now(); this.lastPing=t; this.send({type:'ping',t}); }
+    sendAim(dx,dy,active) {
+      const hz=clamp(this.app.store.data.esp32.sendHz,20,240), t=now();
+      if (t-this.lastAim < 1000/hz) return; this.lastAim=t;
+      this.send({type:'aim',seq:++this.seq,dx:Math.round(dx),dy:Math.round(dy),active:!!active,t});
+    }
+  }
+
+  class Overlay {
+    constructor(app) {
+      this.app=app;
+      this.canvas=document.createElement('canvas');
+      Object.assign(this.canvas.style,{position:'fixed',inset:'0',width:'100vw',height:'100vh',zIndex:'2147483000',pointerEvents:'none'});
+      this.ctx=this.canvas.getContext('2d');
+      document.documentElement.appendChild(this.canvas);
+      this.resize=()=>{ const dpr=Math.min(devicePixelRatio||1,2); this.canvas.width=innerWidth*dpr; this.canvas.height=innerHeight*dpr; this.canvas.style.width=innerWidth+'px'; this.canvas.style.height=innerHeight+'px'; this.ctx.setTransform(dpr,0,0,dpr,0,0); };
+      this.resize(); addEventListener('resize',this.resize);
+    }
+    draw() {
+      const c=this.ctx, cfg=this.app.store.data.visuals; c.clearRect(0,0,innerWidth,innerHeight);
+      if (!cfg.enabled) return;
+      const rect=this.app.locator.updateRect(); if (!rect) return;
+      const hue=(now()/18)%360; const accent=cfg.rgb?`hsl(${hue} 100% 60%)`:'#ff263b';
+      const center={x:rect.left+rect.width/2,y:rect.top+rect.height/2};
+      c.lineWidth=cfg.lineWidth; c.strokeStyle=accent; c.fillStyle=accent;
