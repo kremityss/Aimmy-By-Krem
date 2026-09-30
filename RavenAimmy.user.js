@@ -343,6 +343,191 @@
     get modelFps() { return this.fpsAvg.value; }
   }
 
+
+  class Yolo26Runtime {
+    constructor(app) {
+      this.app = app;
+      this.session = null;
+      this.ready = false;
+      this.busy = false;
+      this.modelName = 'YOLO26 • not loaded';
+      this.backend = 'none';
+      this.inputName = null;
+      this.outputName = null;
+      this.inputSize = 0;
+      this.canvas = document.createElement('canvas');
+      this.ctx = this.canvas.getContext('2d', { willReadFrequently: true });
+      this.detections = [];
+      this.lastBox = null;
+      this.lastRun = 0;
+      this.lastFinish = 0;
+      this.inferAvg = new RingAverage(18);
+      this.fpsAvg = new RingAverage(18);
+      this.objectUrl = null;
+      this.sourceName = '';
+      this.lastTransform = null;
+    }
+    get inferenceMs() { return this.inferAvg.value; }
+    get modelFps() { return this.fpsAvg.value; }
+    async load(source, name='Fortnite YOLO26') {
+      if (!source) throw new Error('Choose a YOLO26 ONNX model file or URL first');
+      await this.app.loader.ensureOrt();
+      if (this.objectUrl) { try { URL.revokeObjectURL(this.objectUrl); } catch {} this.objectUrl=null; }
+      this.ready=false; this.session=null; this.detections=[]; this.lastBox=null;
+      const providers = this.app.device.webgpu ? [['webgpu'], ['wasm']] : [['wasm']];
+      let lastError = null;
+      for (const executionProviders of providers) {
+        try {
+          this.session = await ort.InferenceSession.create(source, {
+            executionProviders,
+            graphOptimizationLevel: 'all'
+          });
+          this.backend = executionProviders[0];
+          break;
+        } catch (e) { lastError=e; this.app.log(\`YOLO provider \${executionProviders[0]} failed: \${e.message}\`); }
+      }
+      if (!this.session) throw lastError || new Error('YOLO26 session failed to load');
+      this.inputName=this.session.inputNames[0];
+      this.outputName=this.session.outputNames[0];
+      const meta=this.session.inputMetadata?.[this.inputName];
+      const dims=meta?.dimensions || meta?.dims || [];
+      const fixedH=Number(dims?.[2]), fixedW=Number(dims?.[3]);
+      if (Number.isFinite(fixedH) && fixedH>0 && fixedH===fixedW) this.inputSize=fixedH;
+      else this.inputSize=clamp(this.app.store.data.vision.yoloInputSize || (this.app.device.mobile?416:640),320,640);
+      this.canvas.width=this.inputSize; this.canvas.height=this.inputSize;
+      this.modelName=name;
+      this.sourceName=name;
+      this.ready=true;
+      this.inferAvg.clear(); this.fpsAvg.clear();
+      this.app.toast(\`\${name} • \${this.backend.toUpperCase()}\`);
+      this.app.ui?.render();
+    }
+    async loadFile(file) {
+      if (!file) return;
+      const buf=await file.arrayBuffer();
+      await this.load(buf, file.name || 'Fortnite YOLO26');
+    }
+    async loadUrl(url) {
+      const clean=(url||'').trim();
+      if (!clean) throw new Error('YOLO URL is empty');
+      await this.load(clean, 'Fortnite YOLO26');
+    }
+    preprocess(video) {
+      const n=this.inputSize;
+      const vw=video.videoWidth, vh=video.videoHeight;
+      const scale=Math.min(n/vw,n/vh);
+      const dw=Math.round(vw*scale), dh=Math.round(vh*scale);
+      const px=Math.floor((n-dw)/2), py=Math.floor((n-dh)/2);
+      const c=this.ctx;
+      c.save(); c.fillStyle='#000'; c.fillRect(0,0,n,n); c.drawImage(video,0,0,vw,vh,px,py,dw,dh); c.restore();
+      const rgba=c.getImageData(0,0,n,n).data;
+      const area=n*n, data=new Float32Array(area*3);
+      for(let i=0,j=0;i<area;i++,j+=4){
+        data[i]=rgba[j]/255;
+        data[area+i]=rgba[j+1]/255;
+        data[area*2+i]=rgba[j+2]/255;
+      }
+      this.lastTransform={scale,px,py,vw,vh};
+      return new ort.Tensor('float32',data,[1,3,n,n]);
+    }
+    toVideoBox(x1,y1,x2,y2,score,classId) {
+      const t=this.lastTransform; if(!t) return null;
+      x1=clamp((x1-t.px)/t.scale,0,t.vw); y1=clamp((y1-t.py)/t.scale,0,t.vh);
+      x2=clamp((x2-t.px)/t.scale,0,t.vw); y2=clamp((y2-t.py)/t.scale,0,t.vh);
+      const w=x2-x1,h=y2-y1;
+      if(w<3||h<3) return null;
+      return {x:x1,y:y1,w,h,score,classId};
+    }
+    iou(a,b) {
+      const x1=Math.max(a.x,b.x),y1=Math.max(a.y,b.y),x2=Math.min(a.x+a.w,b.x+b.w),y2=Math.min(a.y+a.h,b.y+b.h);
+      const inter=Math.max(0,x2-x1)*Math.max(0,y2-y1);
+      return inter/(a.w*a.h+b.w*b.h-inter+1e-6);
+    }
+    nms(boxes,iouThreshold) {
+      const sorted=boxes.sort((a,b)=>b.score-a.score), out=[];
+      while(sorted.length && out.length<64){
+        const best=sorted.shift(); out.push(best);
+        for(let i=sorted.length-1;i>=0;i--) if(sorted[i].classId===best.classId && this.iou(best,sorted[i])>iouThreshold) sorted.splice(i,1);
+      }
+      return out;
+    }
+    parse(tensor) {
+      const d=tensor.data, dims=tensor.dims||[], conf=this.app.store.data.vision.yoloConfidence, out=[];
+      if(dims.length>=2 && dims[dims.length-1]===6){
+        const rows=d.length/6;
+        for(let i=0;i<rows;i++){
+          const o=i*6, score=d[o+4]; if(score<conf) continue;
+          const b=this.toVideoBox(d[o],d[o+1],d[o+2],d[o+3],score,Math.round(d[o+5]));
+          if(b) out.push(b);
+        }
+        return this.nms(out,this.app.store.data.vision.yoloIou);
+      }
+      if(dims.length===3 && dims[1]<dims[2]){
+        const channels=dims[1], count=dims[2], classes=channels-4;
+        for(let i=0;i<count;i++){
+          let score=-Infinity, cls=-1;
+          for(let c=0;c<classes;c++){const v=d[(4+c)*count+i];if(v>score){score=v;cls=c;}}
+          if(score<conf) continue;
+          const cx=d[i],cy=d[count+i],w=d[count*2+i],h=d[count*3+i];
+          const b=this.toVideoBox(cx-w/2,cy-h/2,cx+w/2,cy+h/2,score,cls); if(b) out.push(b);
+        }
+        return this.nms(out,this.app.store.data.vision.yoloIou);
+      }
+      if(dims.length===3 && dims[2]>=6){
+        const count=dims[1], channels=dims[2], classes=channels-4;
+        for(let i=0;i<count;i++){
+          const o=i*channels; let score=-Infinity, cls=-1;
+          for(let c=0;c<classes;c++){const v=d[o+4+c];if(v>score){score=v;cls=c;}}
+          if(score<conf) continue;
+          const cx=d[o],cy=d[o+1],w=d[o+2],h=d[o+3];
+          const b=this.toVideoBox(cx-w/2,cy-h/2,cx+w/2,cy+h/2,score,cls); if(b) out.push(b);
+        }
+        return this.nms(out,this.app.store.data.vision.yoloIou);
+      }
+      this.app.log(\`Unsupported YOLO output shape: \${JSON.stringify(dims)}\`);
+      return [];
+    }
+    async run(video) {
+      if(!this.ready||this.busy||!video) return null;
+      const cfg=this.app.store.data.vision,t=now();
+      const minInterval=Math.max(cfg.intervalMs,1000/clamp(cfg.targetFps,6,this.app.device.mobile?30:60));
+      if(t-this.lastRun<minInterval) return null;
+      if(document.hidden&&this.app.store.data.perf.suspendWhenHidden) return null;
+      this.lastRun=t; this.busy=true;
+      const start=now();
+      try{
+        const input=this.preprocess(video);
+        const outputs=await this.session.run({[this.inputName]:input});
+        const elapsed=now()-start;
+        this.inferAvg.push(elapsed);
+        if(this.lastFinish)this.fpsAvg.push(1000/Math.max(1,now()-this.lastFinish));
+        this.lastFinish=now();
+        const tensor=outputs[this.outputName]||outputs[Object.keys(outputs)[0]];
+        this.detections=this.parse(tensor);
+        this.lastBox=this.bestDetection()||this.detections[0]||null;
+        return this.detections;
+      }catch(e){this.app.log(\`YOLO inference: \${e.message}\`);return null;}
+      finally{this.busy=false;}
+    }
+    aimPoint(box) {
+      if(!box) return null;
+      const mode=this.app.store.data.aim.target;
+      const ratio=mode==='head'?.18:mode==='chest'?.38:.62;
+      return {x:box.x+box.w*.5,y:box.y+box.h*ratio,score:box.score};
+    }
+    bestDetection() {
+      const v=this.app.locator.video;if(!v||!this.detections.length)return null;
+      const cx=v.videoWidth/2,cy=v.videoHeight/2;
+      return this.detections.reduce((best,b)=>{
+        const p=this.aimPoint(b),dist=Math.hypot(p.x-cx,p.y-cy);
+        const weighted=dist/(.25+b.score);
+        return !best||weighted<best.weighted?{box:b,weighted}:best;
+      },null)?.box||null;
+    }
+    targetPoint() { return this.aimPoint(this.bestDetection()); }
+    dispose() { try{this.session?.release?.();}catch{} this.session=null;this.ready=false;this.detections=[]; }
+  }
+
   class StreamMetrics {
     constructor(app) {
       this.app = app; this.streamFps = 0; this.renderFps = 0; this.frame = 0; this.last = now(); this.lastVideoTime = 0;
