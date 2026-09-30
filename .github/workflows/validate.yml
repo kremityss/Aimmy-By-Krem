@@ -1,0 +1,29 @@
+name: Validate Raven Edition
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  userscript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: JavaScript syntax
+        run: node --check RavenAimmy.user.js
+      - name: Userscript metadata
+        run: |
+          grep -q '^// ==UserScript==$' RavenAimmy.user.js
+          grep -q '^// ==/UserScript==$' RavenAimmy.user.js
+          grep -q '@match.*xbox.com' RavenAimmy.user.js
+      - name: Required project files
+        run: |
+          test -s README.md
+          test -s docs/ARCHITECTURE.md
+          test -s esp32s3/RavenLink_ESP32S3.ino
