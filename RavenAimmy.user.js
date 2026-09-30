@@ -367,6 +367,8 @@
       this.objectUrl = null;
       this.sourceName = '';
       this.lastTransform = null;
+      this.cacheDb = 'ravenAimmyModels';
+      this.cacheKey = 'fortnite-primary';
     }
     get inferenceMs() { return this.inferAvg.value; }
     get modelFps() { return this.fpsAvg.value; }
@@ -407,7 +409,27 @@
     async loadFile(file) {
       if (!file) return;
       const buf=await file.arrayBuffer();
-      await this.load(buf, file.name || 'Fortnite YOLO26');
+      await this.load(buf, file.name || 'Fortnite YOLO11n');
+      try { await this.cacheModel(buf,file.name||'weights-3.onnx'); } catch(e) { this.app.log(`Model cache: ${e.message}`); }
+    }
+    async cacheModel(buffer,name) {
+      return await new Promise((resolve,reject)=>{
+        const req=indexedDB.open(this.cacheDb,1);
+        req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('models'))db.createObjectStore('models');};
+        req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));
+        req.onsuccess=()=>{const db=req.result,tx=db.transaction('models','readwrite');tx.objectStore('models').put({name,buffer,ts:Date.now()},this.cacheKey);tx.oncomplete=()=>{db.close();resolve();};tx.onerror=()=>{db.close();reject(tx.error||new Error('Model cache write failed'));};};
+      });
+    }
+    async loadCached() {
+      const entry=await new Promise((resolve,reject)=>{
+        const req=indexedDB.open(this.cacheDb,1);
+        req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('models'))db.createObjectStore('models');};
+        req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));
+        req.onsuccess=()=>{const db=req.result,tx=db.transaction('models','readonly'),get=tx.objectStore('models').get(this.cacheKey);get.onsuccess=()=>{const v=get.result;db.close();resolve(v||null);};get.onerror=()=>{db.close();reject(get.error||new Error('Model cache read failed'));};};
+      });
+      if(!entry?.buffer) return false;
+      await this.load(entry.buffer,entry.name||'Fortnite YOLO11n');
+      return true;
     }
     async loadUrl(url) {
       const clean=(url||'').trim();
@@ -928,8 +950,11 @@
     get activeVision(){ return this.yolo.ready && this.store.data.vision.engine!=='pose' ? this.yolo : this.vision; }
     async ensureDetector(){
       const cfg=this.store.data.vision;
-      if((cfg.engine==='yolo26'||cfg.engine==='auto')&&cfg.yoloUrl){
-        try{await this.yolo.loadUrl(cfg.yoloUrl);return;}catch(e){this.log(`YOLO load failed: ${e.message}`);this.toast('YOLO failed • using pose fallback');}
+      if(cfg.engine==='yolo26'||cfg.engine==='auto'){
+        if(cfg.yoloUrl){
+          try{await this.yolo.loadUrl(cfg.yoloUrl);return;}catch(e){this.log(`YOLO URL load failed: ${e.message}`);}
+        }
+        try{if(await this.yolo.loadCached()) return;}catch(e){this.log(`Cached YOLO load failed: ${e.message}`);}
       }
       await this.loader.ensure();
       await this.vision.loadModel();
