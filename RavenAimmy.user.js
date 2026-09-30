@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Aimmy By Krem — Raven Edition
 // @namespace    https://github.com/kremityss/Aimmy-By-Krem
-// @version      1.0.0
+// @version      1.0.1
 // @description  Raven-branded local vision/control dashboard for Xbox Cloud Gaming with desktop, touch, controller, and optional ESP32-S3 support.
 // @author       Kremityss
 // @match        https://www.xbox.com/*/play/*
