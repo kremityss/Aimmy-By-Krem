@@ -518,3 +518,46 @@
       const hue=(now()/18)%360; const accent=cfg.rgb?`hsl(${hue} 100% 60%)`:'#ff263b';
       const center={x:rect.left+rect.width/2,y:rect.top+rect.height/2};
       c.lineWidth=cfg.lineWidth; c.strokeStyle=accent; c.fillStyle=accent;
+      if (cfg.fov) { c.globalAlpha=.65; c.beginPath(); c.arc(center.x,center.y,this.app.store.data.aim.fov,0,Math.PI*2); c.stroke(); c.globalAlpha=1; }
+      const pose=this.app.vision.lastPose; if (!pose) return;
+      const kp=pose.keypoints||[], min=this.app.store.data.vision.keypointScore;
+      const map=Object.fromEntries(kp.map(k=>[k.name,k]));
+      const project=p=>({x:rect.left+(p.x/this.app.locator.video.videoWidth)*rect.width,y:rect.top+(p.y/this.app.locator.video.videoHeight)*rect.height});
+      const valid=p=>p&&(p.score??0)>=min;
+      if (cfg.skeleton) {
+        const bones=[['left_shoulder','right_shoulder'],['left_shoulder','left_elbow'],['left_elbow','left_wrist'],['right_shoulder','right_elbow'],['right_elbow','right_wrist'],['left_shoulder','left_hip'],['right_shoulder','right_hip'],['left_hip','right_hip'],['left_hip','left_knee'],['left_knee','left_ankle'],['right_hip','right_knee'],['right_knee','right_ankle']];
+        c.globalAlpha=.9;
+        for (const [a,b] of bones) if(valid(map[a])&&valid(map[b])) { const A=project(map[a]),B=project(map[b]); c.beginPath(); c.moveTo(A.x,A.y);c.lineTo(B.x,B.y);c.stroke(); }
+        c.globalAlpha=1;
+      }
+      if (cfg.keypoints) for(const p of kp) if(valid(p)){const P=project(p);c.beginPath();c.arc(P.x,P.y,2.5,0,Math.PI*2);c.fill();}
+      if (cfg.boxes && this.app.vision.lastBox) {
+        const b=this.app.vision.lastBox, A=project({x:b.x,y:b.y}), B=project({x:b.x+b.w,y:b.y+b.h});
+        const x=A.x,y=A.y,w=B.x-A.x,h=B.y-A.y,L=Math.min(18,Math.min(w,h)*.22);
+        c.beginPath();
+        c.moveTo(x+L,y);c.lineTo(x,y);c.lineTo(x,y+L); c.moveTo(x+w-L,y);c.lineTo(x+w,y);c.lineTo(x+w,y+L);
+        c.moveTo(x,y+h-L);c.lineTo(x,y+h);c.lineTo(x+L,y+h); c.moveTo(x+w-L,y+h);c.lineTo(x+w,y+h);c.lineTo(x+w,y+h-L); c.stroke();
+      }
+      const tp=this.app.vision.targetPoint(pose), target=tp?this.app.input.mapTarget(tp):null;
+      if (target && cfg.targetLine && this.app.activation.active()) { c.globalAlpha=.75;c.beginPath();c.moveTo(center.x,center.y);c.lineTo(target.x,target.y);c.stroke();c.globalAlpha=1; }
+    }
+    destroy(){ removeEventListener('resize',this.resize); this.canvas.remove(); }
+  }
+
+  class RavenUI {
+    constructor(app) { this.app=app; this.host=null; this.shadow=null; this.panel=null; this.activeTab='Dashboard'; this.statusTimer=0; this.build(); }
+    containsEvent(e){ return !!(this.host && e.composedPath?.().includes(this.host)); }
+    toggle(){ this.app.store.data.ui.open=!this.app.store.data.ui.open; this.app.store.save(); this.panel.style.display=this.app.store.data.ui.open?'flex':'none'; }
+    build(){
+      this.host=document.createElement('div'); this.host.id='raven-aimmy-root'; this.host.style.position='fixed'; this.host.style.zIndex='2147483646'; this.host.style.left='0'; this.host.style.top='0';
+      this.shadow=this.host.attachShadow({mode:'open'}); document.documentElement.appendChild(this.host);
+      this.shadow.innerHTML=`<style>${this.css()}</style><button class="orb" title="Raven" aria-label="Toggle Raven">R</button><section class="panel"><aside><div class="brand"><b>RAVEN</b><span>AIMMY • KREM</span></div><nav></nav><div class="sidefoot"><span class="dot"></span><span class="bridge-state">LOCAL</span><small>v${BUILD}</small></div></aside><main><header><div class="chip backend">BOOT</span><button class="min">—</button></div></header><div class="content"></div></main></section><div class="toast"></div>`;
+      this.panel=this.shadow.querySelector('.panel'); this.panel.style.display=this.app.store.data.ui.open?'flex':'none';
+      this.shadow.querySelector('.orb').onclick=()=>this.toggle(); this.shadow.querySelector('.min').onclick=()=>this.toggle();
+      const tabs=['Dashboard','Aim','Vision','Visuals','Input','ESP32-S3','Performance','Device','Settings'];
+      const nav=this.shadow.querySelector('nav');
+      tabs.forEach((t,i)=>{const b=document.createElement('button');b.textContent=t;b.className=i===0?'active':'';b.onclick=()=>{this.activeTab=t;$$('nav button',this.shadow).forEach(x=>x.classList.toggle('active',x===b));this.render();};nav.appendChild(b);});
+      this.drag(); this.render();
+      this.statusTimer=setInterval(()=>this.renderStatus(),500);
+    }
+    css(){return `:host{all:initial;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#f5f7fb;--bg:#090a0d;--panel:#111319;--panel2:#171a21;--line:#262a34;--muted:#858b99;--red:#f3263e;--red2:#a80f24}.orb{position:fixed;right:14px;top:42%;width:46px;height:46px;border-radius:15px;border:1px solid #ffffff1b;background:linear-gradient(145deg,#241117,#090a0d);color:#fff;font-weight:950;box-shadow:0 14px 40px #0009,0 0 26px #f3263e33;backdrop-filter:blur(16px)}.panel{position:fixed;left:24px;top:70px;width:min(860px,calc(100vw - 36px));height:min(600px,calc(100vh - 110px));display:flex;background:#090a0df2;border:1px solid #ffffff12;b
