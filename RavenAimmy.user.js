@@ -385,7 +385,7 @@
           });
           this.backend = executionProviders[0];
           break;
-        } catch (e) { lastError=e; this.app.log(\`YOLO provider \${executionProviders[0]} failed: \${e.message}\`); }
+        } catch (e) { lastError=e; this.app.log(`YOLO provider ${executionProviders[0]} failed: ${e.message}`); }
       }
       if (!this.session) throw lastError || new Error('YOLO26 session failed to load');
       this.inputName=this.session.inputNames[0];
@@ -400,7 +400,7 @@
       this.sourceName=name;
       this.ready=true;
       this.inferAvg.clear(); this.fpsAvg.clear();
-      this.app.toast(\`\${name} • \${this.backend.toUpperCase()}\`);
+      this.app.toast(`${name} • ${this.backend.toUpperCase()}`);
       this.app.ui?.render();
     }
     async loadFile(file) {
@@ -485,7 +485,7 @@
         }
         return this.nms(out,this.app.store.data.vision.yoloIou);
       }
-      this.app.log(\`Unsupported YOLO output shape: \${JSON.stringify(dims)}\`);
+      this.app.log(`Unsupported YOLO output shape: ${JSON.stringify(dims)}`);
       return [];
     }
     async run(video) {
@@ -507,7 +507,7 @@
         this.detections=this.parse(tensor);
         this.lastBox=this.bestDetection()||this.detections[0]||null;
         return this.detections;
-      }catch(e){this.app.log(\`YOLO inference: \${e.message}\`);return null;}
+      }catch(e){this.app.log(`YOLO inference: ${e.message}`);return null;}
       finally{this.busy=false;}
     }
     aimPoint(box) {
