@@ -275,7 +275,8 @@
       const cfg = this.app.store.data.vision;
       if (!cfg.enabled || this.busy || !this.detector || !video) return null;
       const t = now();
-      if (cfg.intervalMs > 0 && t - this.lastRun < cfg.intervalMs) return null;
+      const minInterval = Math.max(cfg.intervalMs, 1000 / clamp(cfg.targetFps, 6, this.app.device?.mobile ? 30 : 60));
+      if (t - this.lastRun < minInterval) return null;
       if (document.hidden && this.app.store.data.perf.suspendWhenHidden) return null;
       this.lastRun = t;
       this.busy = true;
@@ -609,15 +610,21 @@
         const t = e.touches?.[0]; if (!t) return;
         const rect = this.app.locator.updateRect(); if (!rect) return;
         if (t.clientX > rect.left + rect.width * .48) {
-          this.touchStart = { x:t.clientX, y:t.clientY };
+          this.touchStart = { x:t.clientX, y:t.clientY, id:t.identifier ?? 1, target:t.target || e.target };
           if (this.app.store.data.aim.touchHold) this.app.activation.touchAim = true;
         }
       };
+      const onMove = e => {
+        if (!this.touchStart) return;
+        const t = e.touches?.[0];
+        if (t) this.touchStart = { x:t.clientX, y:t.clientY, id:t.identifier ?? 1, target:t.target || e.target };
+      };
       const onEnd = () => { this.touchStart = null; this.app.activation.touchAim = false; };
       window.addEventListener('touchstart', onStart, {capture:true,passive:true});
+      window.addEventListener('touchmove', onMove, {capture:true,passive:true});
       window.addEventListener('touchend', onEnd, {capture:true,passive:true});
       window.addEventListener('touchcancel', onEnd, {capture:true,passive:true});
-      this._touchHandlers = [onStart,onEnd];
+      this._touchHandlers = [onStart,onMove,onEnd];
     }
     pollGamepad() {
       const loop = () => {
@@ -662,6 +669,7 @@
       this.smoothed.y = lerp(this.smoothed.y, dy, .6);
       const adapter = this.resolveAdapter();
       if (adapter === 'esp32') this.app.bridge.sendAim(this.smoothed.x, this.smoothed.y, this.app.activation.active());
+      else if (adapter === 'pointer' && source === 'touch' && this.app.store.data.input.mobileTouch) this.mobileDelta(this.smoothed.x, this.smoothed.y);
       else if (adapter === 'pointer') this.pointerDelta(this.smoothed.x, this.smoothed.y);
     }
     resolveAdapter() {
@@ -685,24 +693,42 @@
     }
     pointerDelta(dx,dy) {
       const video = this.app.locator.video;
-      const el = document.pointerLockElement || $('#game-stream') || video;
-      if (!el) return;
+      const el = document.pointerLockElement || $('#game-stream') || video || document.body;
+      if (!video || !el) return;
       const rect = video.getBoundingClientRect();
-      const evt = new PointerEvent('pointermove', {
-        bubbles:true, cancelable:true, pointerType:'mouse', isPrimary:true,
-        clientX: rect.left+rect.width/2+dx,
-        clientY: rect.top+rect.height/2+dy,
-        movementX: Math.round(dx),
-        movementY: Math.round(dy)
-      });
-      el.dispatchEvent(evt);
+      const mx=Math.round(dx), my=Math.round(dy);
+      const init={bubbles:true,cancelable:true,clientX:rect.left+rect.width/2+dx,clientY:rect.top+rect.height/2+dy,buttons:1};
+      const p = new PointerEvent('pointermove',{...init,pointerType:'mouse',isPrimary:true});
+      try { Object.defineProperty(p,'movementX',{value:mx}); Object.defineProperty(p,'movementY',{value:my}); } catch {}
+      el.dispatchEvent(p);
+      const m = new MouseEvent('mousemove',init);
+      try { Object.defineProperty(m,'movementX',{value:mx}); Object.defineProperty(m,'movementY',{value:my}); } catch {}
+      el.dispatchEvent(m);
+      if (el !== document) document.dispatchEvent(m);
+    }
+    mobileDelta(dx,dy) {
+      const video=this.app.locator.video, touch=this.touchStart;
+      if(!video||!touch) return;
+      const strength=clamp(this.app.store.data.input.touchAssistStrength,.05,1);
+      const nx=clamp(touch.x+dx*strength,0,innerWidth), ny=clamp(touch.y+dy*strength,0,innerHeight);
+      const el=document.elementFromPoint(touch.x,touch.y)||touch.target||video;
+      const p=new PointerEvent('pointermove',{bubbles:true,cancelable:true,pointerType:'touch',pointerId:touch.id||1,isPrimary:true,clientX:nx,clientY:ny,buttons:1});
+      try { Object.defineProperty(p,'movementX',{value:Math.round(dx*strength)}); Object.defineProperty(p,'movementY',{value:Math.round(dy*strength)}); } catch {}
+      el.dispatchEvent(p);
+      try {
+        if (typeof Touch==='function' && typeof TouchEvent==='function') {
+          const t=new Touch({identifier:touch.id||1,target:el,clientX:nx,clientY:ny,screenX:nx,screenY:ny,pageX:nx,pageY:ny,radiusX:1,radiusY:1,rotationAngle:0,force:.5});
+          el.dispatchEvent(new TouchEvent('touchmove',{bubbles:true,cancelable:true,touches:[t],targetTouches:[t],changedTouches:[t]}));
+        }
+      } catch {}
     }
     destroy() {
       cancelAnimationFrame(this.gamepadLoop);
       if (this._touchHandlers) {
         window.removeEventListener('touchstart', this._touchHandlers[0], true);
-        window.removeEventListener('touchend', this._touchHandlers[1], true);
-        window.removeEventListener('touchcancel', this._touchHandlers[1], true);
+        window.removeEventListener('touchmove', this._touchHandlers[1], true);
+        window.removeEventListener('touchend', this._touchHandlers[2], true);
+        window.removeEventListener('touchcancel', this._touchHandlers[2], true);
       }
     }
   }
