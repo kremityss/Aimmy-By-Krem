@@ -218,3 +218,123 @@
       const order = pref === 'auto' ? ['webgpu','webgl','cpu'] : [pref, 'webgl', 'cpu'];
       for (const b of [...new Set(order)]) {
         try {
+          if (!tf.findBackend(b) && b !== 'cpu') continue;
+          if (await tf.setBackend(b)) {
+            await tf.ready();
+            this.backend = tf.getBackend();
+            if (this.backend === 'webgl') {
+              try { tf.env().set('WEBGL_PACK', true); } catch {}
+              try { tf.env().set('WEBGL_FORCE_F16_TEXTURES', true); } catch {}
+            }
+            return;
+          }
+        } catch (e) { this.app.log(`Backend ${b} failed: ${e.message}`); }
+      }
+      throw new Error('No TensorFlow.js backend available');
+    }
+    async loadModel(force = false) {
+      if (this.detector && !force) return;
+      if (this.detector?.dispose) this.detector.dispose();
+      this.detector = null;
+      await this.configureBackend();
+      const cfg = this.app.store.data.vision;
+      const modelType = cfg.model === 'thunder'
+        ? poseDetection.movenet.modelType.SINGLEPOSE_THUNDER
+        : poseDetection.movenet.modelType.SINGLEPOSE_LIGHTNING;
+      const options = { modelType, enableSmoothing: false, minPoseScore: cfg.minScore };
+      this.detector = await poseDetection.createDetector(poseDetection.SupportedModels.MoveNet, options);
+      this.modelName = cfg.model === 'thunder' ? 'MoveNet Thunder' : 'MoveNet Lightning';
+      this.inferAvg.clear(); this.fpsAvg.clear();
+      this.app.toast(`${this.modelName} • ${this.backend.toUpperCase()}`);
+    }
+    async run(video) {
+      const cfg = this.app.store.data.vision;
+      if (!cfg.enabled || this.busy || !this.detector || !video) return null;
+      const t = now();
+      if (cfg.intervalMs > 0 && t - this.lastRun < cfg.intervalMs) return null;
+      if (document.hidden && this.app.store.data.perf.suspendWhenHidden) return null;
+      this.lastRun = t;
+      this.busy = true;
+      const start = now();
+      try {
+        const poses = await this.detector.estimatePoses(video, { maxPoses: cfg.maxPoses, flipHorizontal: false });
+        const elapsed = now() - start;
+        this.inferAvg.push(elapsed);
+        if (this.lastFinish) this.fpsAvg.push(1000 / Math.max(1, now() - this.lastFinish));
+        this.lastFinish = now();
+        const pose = poses?.[0] || null;
+        this.lastPose = pose;
+        this.lastBox = pose ? this.boxFromPose(pose) : null;
+        this.adapt(elapsed);
+        return pose;
+      } catch (e) {
+        this.app.log(`Inference error: ${e.message}`);
+        return null;
+      } finally { this.busy = false; }
+    }
+    adapt(ms) {
+      const cfg = this.app.store.data.vision;
+      if (!cfg.adaptive) return;
+      const targetMs = 1000 / clamp(cfg.targetFps, 10, 120);
+      if (ms > targetMs * 1.6 && cfg.intervalMs < 50) cfg.intervalMs = Math.min(50, cfg.intervalMs + 2);
+      else if (ms < targetMs * .75 && cfg.intervalMs > 0) cfg.intervalMs = Math.max(0, cfg.intervalMs - 1);
+    }
+    boxFromPose(pose) {
+      const k = pose.keypoints?.filter(p => (p.score ?? 0) >= this.app.store.data.vision.keypointScore) || [];
+      if (!k.length) return null;
+      const xs = k.map(p=>p.x), ys = k.map(p=>p.y);
+      return { x: Math.min(...xs), y: Math.min(...ys), w: Math.max(...xs)-Math.min(...xs), h: Math.max(...ys)-Math.min(...ys) };
+    }
+    targetPoint(pose) {
+      if (!pose?.keypoints?.length) return null;
+      const map = Object.fromEntries(pose.keypoints.map(k => [k.name, k]));
+      const min = this.app.store.data.vision.keypointScore;
+      const valid = k => k && (k.score ?? 0) >= min;
+      const aim = this.app.store.data.aim;
+      let p = null;
+      if (aim.target === 'head') {
+        p = valid(map.nose) ? map.nose : valid(map.left_eye) ? map.left_eye : map.right_eye;
+      } else if (aim.target === 'chest') {
+        const a = map.left_shoulder, b = map.right_shoulder;
+        if (valid(a) && valid(b)) p = { x:(a.x+b.x)/2, y:(a.y+b.y)/2, score:Math.min(a.score,b.score) };
+      } else if (aim.target === 'hip') {
+        const a = map.left_hip, b = map.right_hip;
+        if (valid(a) && valid(b)) p = { x:(a.x+b.x)/2, y:(a.y+b.y)/2, score:Math.min(a.score,b.score) };
+      }
+      if (!p) return null;
+      return { x:p.x, y:p.y + aim.headOffset, score:p.score ?? 1 };
+    }
+    get inferenceMs() { return this.inferAvg.value; }
+    get modelFps() { return this.fpsAvg.value; }
+  }
+
+  class StreamMetrics {
+    constructor(app) {
+      this.app = app; this.streamFps = 0; this.renderFps = 0; this.frame = 0; this.last = now(); this.lastVideoTime = 0;
+      this._raf = 0; this._videoCallback = 0;
+    }
+    start(video) {
+      this.stop();
+      const renderLoop = t => {
+        this.frame++;
+        if (t - this.last >= 1000) { this.renderFps = this.frame * 1000 / (t-this.last); this.frame=0; this.last=t; }
+        this._raf = requestAnimationFrame(renderLoop);
+      };
+      this._raf = requestAnimationFrame(renderLoop);
+      if (video?.requestVideoFrameCallback) {
+        let vf=0, start=now();
+        const tick = () => {
+          vf++;
+          const t = now();
+          if (t-start >= 1000) { this.streamFps = vf*1000/(t-start); vf=0; start=t; }
+          if (this.app.running && this.app.locator.video === video) this._videoCallback = video.requestVideoFrameCallback(tick);
+        };
+        this._videoCallback = video.requestVideoFrameCallback(tick);
+      }
+    }
+    stop() {
+      if (this._raf) cancelAnimationFrame(this._raf);
+      const v = this.app.locator.video;
+      if (this._videoCallback && v?.cancelVideoFrameCallback) try { v.cancelVideoFrameCallback(this._videoCallback); } catch {}
+    }
+  }
