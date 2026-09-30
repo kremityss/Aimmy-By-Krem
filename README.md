@@ -49,3 +49,36 @@ Synthetic JavaScript pointer/gamepad events are not equivalent to trusted physic
 ## Install
 Install `RavenAimmy.user.js` in a userscript manager, open Xbox Cloud Gaming, and use **Alt + Shift + R** to toggle the Raven panel.
 
+
+
+## Fortnite model currently supported
+
+The inspected `weights-3.onnx` upload is a fixed-size **Ultralytics YOLO11n detection model** with one class: `enemy`.
+
+Runtime contract:
+
+- Input: `images` → `float32 [1,3,640,640]`
+- Layout: NCHW
+- Normalization: RGB / 255
+- Output: `output0` → `float32 [1,300,6]`
+- Output row: `[x1, y1, x2, y2, confidence, class_id]`
+- Export-time NMS: enabled
+- Class 0: `enemy`
+
+Raven 1.1.1 detects this shape directly and skips a second JavaScript NMS pass. The model can be loaded from the **AI MODEL** tab using the local file picker. After a successful local load, Raven caches the model in IndexedDB as the primary Fortnite model so it can be reused on later sessions without selecting it again.
+
+The model file itself is not committed into this repository. Its inspected metadata and SHA-256 fingerprint are recorded in `models/weights-3.meta.json`.
+
+## Mobile performance profile
+
+On iOS and Android, Raven automatically uses a lower-overhead profile:
+
+- adaptive detector FPS cap based on available CPU/memory hints
+- 1× overlay DPR instead of a high-DPI full-screen canvas
+- skeleton/keypoint/RGB effects disabled by default
+- viewport/orientation-aware full-screen menu sizing
+- horizontal touch-friendly ImGui-style navigation
+- right-side touch activation for camera/aim region
+- separate touch gain and touch-assist strength controls
+- local browser input remains the default; ESP32-S3 is optional
+
