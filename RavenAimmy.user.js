@@ -775,7 +775,7 @@
       Object.assign(this.canvas.style,{position:'fixed',inset:'0',width:'100vw',height:'100vh',zIndex:'2147483000',pointerEvents:'none'});
       this.ctx=this.canvas.getContext('2d');
       document.documentElement.appendChild(this.canvas);
-      this.resize=()=>{ const dpr=Math.min(devicePixelRatio||1,2); this.canvas.width=innerWidth*dpr; this.canvas.height=innerHeight*dpr; this.canvas.style.width=innerWidth+'px'; this.canvas.style.height=innerHeight+'px'; this.ctx.setTransform(dpr,0,0,dpr,0,0); };
+      this.resize=()=>{ const dpr=this.app.device?.mobile?1:Math.min(devicePixelRatio||1,1.5); this.canvas.width=innerWidth*dpr; this.canvas.height=innerHeight*dpr; this.canvas.style.width=innerWidth+'px'; this.canvas.style.height=innerHeight+'px'; this.ctx.setTransform(dpr,0,0,dpr,0,0); };
       this.resize(); addEventListener('resize',this.resize);
     }
     draw() {
@@ -865,32 +865,65 @@
   }
 
   class RavenApp {
-    constructor(){this.running=true;this.store=new RavenStore();this.logs=[];this.device=null;this.controllerName='None';this.locator=new VideoLocator();this.loader=new LibraryLoader(m=>this.log(m));this.vision=new VisionRuntime(this);this.bridge=new RavenBridge(this);this.activation=null;this.input=null;this.metrics=new StreamMetrics(this);this.overlay=null;this.ui=null;this.loopHandle=0;this.lastOverlay=0;}
+    constructor(){this.running=true;this.store=new RavenStore();this.logs=[];this.device=null;this.controllerName='None';this.locator=new VideoLocator();this.loader=new LibraryLoader(m=>this.log(m));this.vision=new VisionRuntime(this);this.yolo=new Yolo26Runtime(this);this.bridge=new RavenBridge(this);this.activation=null;this.input=null;this.metrics=new StreamMetrics(this);this.overlay=null;this.ui=null;this.loopHandle=0;this.lastOverlay=0;}
     log(m){this.logs.push({t:Date.now(),m});if(this.logs.length>100)this.logs.shift();console.info('[Raven]',m);}
     toast(m){this.ui?.toast(m);}
     async boot(){
       this.device=await DeviceProfile.detect();
+      this.applyDeviceTuning();
       this.activation=new ActivationState(this);
       this.input=new InputRouter(this);
       this.overlay=new Overlay(this);
       this.ui=new RavenUI(this);
       this.toast(`Raven ${BUILD} • ${this.device.label}`);
-      await this.loader.ensure();
-      await this.vision.loadModel();
+      await this.ensureDetector();
       await this.waitForVideo();
       if(this.store.data.esp32.enabled) this.bridge.connect();
       this.loop();
+    }
+    applyDeviceTuning(){
+      const s=this.store.data, d=this.device;
+      const low=(d.cores&&d.cores<=4)||(d.memory&&d.memory<=4);
+      if(d.mobile){
+        s.vision.targetFps=Math.min(s.vision.targetFps, low?12:18);
+        s.vision.intervalMs=Math.max(s.vision.intervalMs, low?55:32);
+        s.perf.overlayFps=Math.min(s.perf.overlayFps, low?20:30);
+        s.visuals.skeleton=false; s.visuals.keypoints=false; s.visuals.rgb=false;
+        s.aim.fov=clamp(Math.round(d.shortSide*.22),90,190);
+        s.input.mobileTouch=true;
+      }else{
+        s.vision.targetFps=Math.min(Math.max(s.vision.targetFps,24),45);
+        s.perf.overlayFps=Math.min(Math.max(s.perf.overlayFps,30),60);
+      }
+      this.store.save();
+    }
+    get activeVision(){ return this.yolo.ready && this.store.data.vision.engine!=='pose' ? this.yolo : this.vision; }
+    async ensureDetector(){
+      const cfg=this.store.data.vision;
+      if((cfg.engine==='yolo26'||cfg.engine==='auto')&&cfg.yoloUrl){
+        try{await this.yolo.loadUrl(cfg.yoloUrl);return;}catch(e){this.log(`YOLO load failed: ${e.message}`);this.toast('YOLO failed • using pose fallback');}
+      }
+      await this.loader.ensure();
+      await this.vision.loadModel();
     }
     async waitForVideo(){for(let i=0;i<180&&this.running;i++){const v=this.locator.find();if(v){this.metrics.start(v);this.toast('xCloud stream attached');return v;}await sleep(500);}this.log('No live video found yet; continuing discovery in loop.');return null;}
     loop=async()=>{
       if(!this.running)return;
       let video=this.locator.video;
       if(!video||!document.contains(video)||video.readyState<2){const old=video;video=this.locator.find();if(video&&video!==old)this.metrics.start(video);}
-      if(video&&this.vision.detector){const pose=await this.vision.run(video);if(pose){const target=this.vision.targetPoint(pose);if(target)await this.input.apply(target);}}
+      let target=null;
+      if(video&&this.yolo.ready&&this.store.data.vision.engine!=='pose'){
+        const detections=await this.yolo.run(video);
+        if(detections?.length) target=this.yolo.targetPoint();
+      }else if(video&&this.vision.detector){
+        const pose=await this.vision.run(video);
+        if(pose) target=this.vision.targetPoint(pose);
+      }
+      if(target) await this.input.apply(target);
       const t=now(), cap=clamp(this.store.data.perf.overlayFps,15,120);if(t-this.lastOverlay>=1000/cap){this.lastOverlay=t;this.overlay.draw();}
       this.loopHandle=requestAnimationFrame(this.loop);
     }
-    destroy(){if(!this.running)return;this.running=false;cancelAnimationFrame(this.loopHandle);this.metrics.stop();this.bridge.disconnect();this.input?.destroy();this.activation?.destroy();this.overlay?.destroy();this.ui?.destroy();try{this.vision.detector?.dispose?.();}catch{}delete window[NS];console.info('[Raven] Unloaded');}
+    destroy(){if(!this.running)return;this.running=false;cancelAnimationFrame(this.loopHandle);this.metrics.stop();this.bridge.disconnect();this.input?.destroy();this.activation?.destroy();this.overlay?.destroy();this.ui?.destroy();try{this.vision.detector?.dispose?.();}catch{}try{this.yolo?.dispose?.();}catch{}delete window[NS];console.info('[Raven] Unloaded');}
   }
 
   const app=new RavenApp();
