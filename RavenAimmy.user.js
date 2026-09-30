@@ -338,3 +338,123 @@
       if (this._videoCallback && v?.cancelVideoFrameCallback) try { v.cancelVideoFrameCallback(this._videoCallback); } catch {}
     }
   }
+
+  class ActivationState {
+    constructor(app) {
+      this.app = app; this.mouseRight = false; this.touchAim = false; this.toggle = false; this.gpAim = false;
+      this.down = e => {
+        if (e.button === 2) this.mouseRight = true;
+        if (e.code === 'AltLeft' || e.code === 'AltRight') this.alt = true;
+        if (e.shiftKey && e.altKey && e.code === 'KeyR') { e.preventDefault(); app.ui.toggle(); }
+        if (e.code === 'F8') { e.preventDefault(); this.toggle = !this.toggle; app.toast(`Aim ${this.toggle?'armed':'disarmed'}`); }
+      };
+      this.up = e => { if (e.button === 2) this.mouseRight = false; };
+      window.addEventListener('pointerdown', this.down, true);
+      window.addEventListener('pointerup', this.up, true);
+      window.addEventListener('keydown', this.down, true);
+      window.addEventListener('keyup', this.up, true);
+    }
+    active() {
+      const c = this.app.store.data.aim;
+      if (!c.enabled) return false;
+      if (c.activation === 'always') return true;
+      if (c.activation === 'toggle') return this.toggle;
+      return this.mouseRight || this.touchAim || this.gpAim;
+    }
+    destroy() {
+      window.removeEventListener('pointerdown', this.down, true); window.removeEventListener('pointerup', this.up, true);
+      window.removeEventListener('keydown', this.down, true); window.removeEventListener('keyup', this.up, true);
+    }
+  }
+
+  class InputRouter {
+    constructor(app) {
+      this.app = app;
+      this.lastTarget = null;
+      this.smoothed = {x:0,y:0};
+      this.lastSend = 0;
+      this.gamepadLoop = 0;
+      this.touchStart = null;
+      this.bindTouch();
+      this.pollGamepad();
+    }
+    bindTouch() {
+      const onStart = e => {
+        if (!this.app.device.touch || this.app.ui.containsEvent(e)) return;
+        const t = e.touches?.[0]; if (!t) return;
+        const rect = this.app.locator.updateRect(); if (!rect) return;
+        if (t.clientX > rect.left + rect.width * .48) {
+          this.touchStart = { x:t.clientX, y:t.clientY };
+          if (this.app.store.data.aim.touchHold) this.app.activation.touchAim = true;
+        }
+      };
+      const onEnd = () => { this.touchStart = null; this.app.activation.touchAim = false; };
+      window.addEventListener('touchstart', onStart, {capture:true,passive:true});
+      window.addEventListener('touchend', onEnd, {capture:true,passive:true});
+      window.addEventListener('touchcancel', onEnd, {capture:true,passive:true});
+      this._touchHandlers = [onStart,onEnd];
+    }
+    pollGamepad() {
+      const loop = () => {
+        const pads = navigator.getGamepads?.() || [];
+        const gp = [...pads].find(Boolean);
+        if (gp) {
+          const idx = this.app.store.data.aim.controllerButton;
+          this.app.activation.gpAim = !!gp.buttons?.[idx]?.pressed;
+          this.app.controllerName = gp.id || 'Gamepad';
+        } else {
+          this.app.activation.gpAim = false; this.app.controllerName = 'None';
+        }
+        if (this.app.running) this.gamepadLoop = requestAnimationFrame(loop);
+      };
+      this.gamepadLoop = requestAnimationFrame(loop);
+    }
+    mapTarget(point) {
+      const video = this.app.locator.video, rect = this.app.locator.updateRect();
+      if (!video || !rect || !point) return null;
+      const sx = rect.width / video.videoWidth;
+      const sy = rect.height / video.videoHeight;
+      return { x: rect.left + point.x * sx, y: rect.top + point.y * sy };
+    }
+    async apply(point) {
+      if (!point || !this.app.activation.active()) return;
+      const rect = this.app.locator.updateRect(); if (!rect) return;
+      const target = this.mapTarget(point); if (!target) return;
+      const cx = rect.left + rect.width/2, cy = rect.top + rect.height/2;
+      let dx = target.x-cx, dy = target.y-cy;
+      const dist = Math.hypot(dx,dy);
+      const cfg = this.app.store.data.aim;
+      if (dist > cfg.fov || dist < cfg.deadzone) return;
+      const scale = clamp(cfg.smoothing, .01, 1);
+      dx = clamp(dx*scale, -cfg.maxStep, cfg.maxStep);
+      dy = clamp(dy*scale, -cfg.maxStep, cfg.maxStep);
+      if (this.app.store.data.input.invertY) dy = -dy;
+      this.smoothed.x = lerp(this.smoothed.x, dx, .6);
+      this.smoothed.y = lerp(this.smoothed.y, dy, .6);
+      const adapter = this.resolveAdapter();
+      if (adapter === 'esp32') this.app.bridge.sendAim(this.smoothed.x, this.smoothed.y, this.app.activation.active());
+      else if (adapter === 'pointer') this.pointerDelta(this.smoothed.x, this.smoothed.y);
+    }
+    resolveAdapter() {
+      const selected = this.app.store.data.input.adapter;
+      if (selected !== 'auto') return selected;
+      if (this.app.store.data.esp32.enabled && this.app.bridge.connected) return 'esp32';
+      return 'pointer';
+    }
+    pointerDelta(dx,dy) {
+      const video = this.app.locator.video;
+      const el = document.pointerLockElement || $('#game-stream') || video;
+      if (!el) return;
+      const rect = video.getBoundingClientRect();
+      const evt = new PointerEvent('pointermove', {
+        bubbles:true, cancelable:true, pointerType:'mouse', isPrimary:true,
+        clientX: rect.left+rect.width/2+dx,
+        clientY: rect.top+rect.height/2+dy,
+        movementX: Math.round(dx*this.app.store.data.input.mouseGain),
+        movementY: Math.round(dy*this.app.store.data.input.mouseGain)
+      });
+      el.dispatchEvent(evt);
+    }
+    destroy() {
+      cancelAnimationFrame(this.gamepadLoop);
+      if (this._touchHandlers) {
