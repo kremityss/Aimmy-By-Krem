@@ -385,6 +385,9 @@
       this.providerAttempts = [];
       this.dynamicFpsCap = 60;
       this.warmupMs = 0;
+      this.outputShape = '—';
+      this.maxScore = 0;
+      this.rawRows = 0;
     }
     get inferenceMs() { return this.inferAvg.value; }
     get modelFps() { return this.fpsAvg.value; }
@@ -506,6 +509,8 @@
     }
     toVideoBox(x1,y1,x2,y2,score,classId) {
       const t=this.lastTransform; if(!t) return null;
+      const maxCoord=Math.max(Math.abs(x1),Math.abs(y1),Math.abs(x2),Math.abs(y2));
+      if(maxCoord<=2){x1*=this.inputSize;y1*=this.inputSize;x2*=this.inputSize;y2*=this.inputSize;}
       x1=clamp((x1-t.px)/t.scale,0,t.vw); y1=clamp((y1-t.py)/t.scale,0,t.vh);
       x2=clamp((x2-t.px)/t.scale,0,t.vw); y2=clamp((y2-t.py)/t.scale,0,t.vh);
       const w=x2-x1,h=y2-y1;
@@ -527,10 +532,13 @@
     }
     parse(tensor) {
       const d=tensor.data, dims=tensor.dims||[], conf=this.app.store.data.vision.yoloConfidence, out=[];
+      this.outputShape=dims.length?dims.join('×'):'unknown';
+      this.maxScore=0;
+      this.rawRows=0;
       if(dims.length>=2 && dims[dims.length-1]===6){
-        const rows=d.length/6;
+        const rows=d.length/6; this.rawRows=rows;
         for(let i=0;i<rows;i++){
-          const o=i*6, score=d[o+4]; if(score<conf) continue;
+          const o=i*6, score=d[o+4]; if(Number.isFinite(score)) this.maxScore=Math.max(this.maxScore,score); if(score<conf) continue;
           const b=this.toVideoBox(d[o],d[o+1],d[o+2],d[o+3],score,Math.round(d[o+5]));
           if(b) out.push(b);
         }
@@ -539,22 +547,22 @@
         return out;
       }
       if(dims.length===3 && dims[1]<dims[2]){
-        const channels=dims[1], count=dims[2], classes=channels-4;
+        const channels=dims[1], count=dims[2], classes=channels-4; this.rawRows=count;
         for(let i=0;i<count;i++){
           let score=-Infinity, cls=-1;
           for(let c=0;c<classes;c++){const v=d[(4+c)*count+i];if(v>score){score=v;cls=c;}}
-          if(score<conf) continue;
+          if(Number.isFinite(score)) this.maxScore=Math.max(this.maxScore,score); if(score<conf) continue;
           const cx=d[i],cy=d[count+i],w=d[count*2+i],h=d[count*3+i];
           const b=this.toVideoBox(cx-w/2,cy-h/2,cx+w/2,cy+h/2,score,cls); if(b) out.push(b);
         }
         return this.nms(out,this.app.store.data.vision.yoloIou);
       }
       if(dims.length===3 && dims[2]>=6){
-        const count=dims[1], channels=dims[2], classes=channels-4;
+        const count=dims[1], channels=dims[2], classes=channels-4; this.rawRows=count;
         for(let i=0;i<count;i++){
           const o=i*channels; let score=-Infinity, cls=-1;
           for(let c=0;c<classes;c++){const v=d[o+4+c];if(v>score){score=v;cls=c;}}
-          if(score<conf) continue;
+          if(Number.isFinite(score)) this.maxScore=Math.max(this.maxScore,score); if(score<conf) continue;
           const cx=d[o],cy=d[o+1],w=d[o+2],h=d[o+3];
           const b=this.toVideoBox(cx-w/2,cy-h/2,cx+w/2,cy+h/2,score,cls); if(b) out.push(b);
         }
@@ -980,7 +988,7 @@
   }
 
   class RavenApp {
-    constructor(){this.running=true;this.store=new RavenStore();this.logs=[];this.device=null;this.controllerName='None';this.locator=new VideoLocator();this.loader=new LibraryLoader(m=>this.log(m));this.vision=new VisionRuntime(this);this.yolo=new Yolo26Runtime(this);this.bridge=new RavenBridge(this);this.activation=null;this.input=null;this.metrics=new StreamMetrics(this);this.overlay=null;this.ui=null;this.loopHandle=0;this.lastOverlay=0;}
+    constructor(){this.running=true;this.store=new RavenStore();this.logs=[];this.device=null;this.controllerName='None';this.detectorError='';this.uiError='';this.locator=new VideoLocator();this.loader=new LibraryLoader(m=>this.log(m));this.vision=new VisionRuntime(this);this.yolo=new Yolo26Runtime(this);this.bridge=new RavenBridge(this);this.activation=null;this.input=null;this.metrics=new StreamMetrics(this);this.overlay=null;this.ui=null;this.loopHandle=0;this.lastOverlay=0;}
     log(m){this.logs.push({t:Date.now(),m});if(this.logs.length>100)this.logs.shift();console.info('[Raven]',m);}
     toast(m){this.ui?.toast(m);}
     async boot(){
@@ -991,7 +999,8 @@
       this.overlay=new Overlay(this);
       this.ui=new RavenUI(this);
       this.toast(`Raven ${BUILD} • ${this.device.label}`);
-      await this.ensureDetector();
+      try{await this.ensureDetector();this.detectorError='';}
+      catch(e){this.detectorError=e?.message||String(e);this.log(`Detector boot: ${this.detectorError}`);this.toast('Detector not ready • open AI tab');}
       await this.waitForVideo();
       if(this.store.data.esp32.enabled) this.bridge.connect();
       this.loop();
@@ -1000,29 +1009,32 @@
       const s=this.store.data, d=this.device;
       const low=(d.cores&&d.cores<=4)||(d.memory&&d.memory<=4);
       if(d.mobile){
-        s.vision.targetFps=Math.min(s.vision.targetFps, low?12:18);
-        s.vision.intervalMs=Math.max(s.vision.intervalMs, low?55:32);
-        s.perf.overlayFps=Math.min(s.perf.overlayFps, low?20:30);
+        s.vision.targetFps=d.webgpu?(low?30:45):(low?12:20);
+        s.vision.intervalMs=0;
+        s.perf.overlayFps=d.webgpu?30:20;
         s.visuals.skeleton=false; s.visuals.keypoints=false; s.visuals.rgb=false;
         s.aim.fov=clamp(Math.round(d.shortSide*.22),90,190);
         s.input.mobileTouch=true;
       }else{
-        s.vision.targetFps=Math.min(Math.max(s.vision.targetFps,24),45);
-        s.perf.overlayFps=Math.min(Math.max(s.perf.overlayFps,30),60);
+        s.vision.targetFps=d.webgpu?60:30;
+        s.vision.intervalMs=0;
+        s.perf.overlayFps=d.webgpu?60:30;
       }
       this.store.save();
     }
-    get activeVision(){ return this.yolo.ready && this.store.data.vision.engine!=='pose' ? this.yolo : this.vision; }
+    get activeVision(){ if(this.yolo.ready&&this.store.data.vision.engine!=='pose')return this.yolo;if(this.vision.detector)return this.vision;return this.yolo; }
     async ensureDetector(){
       const cfg=this.store.data.vision;
+      this.detectorError='';
       if(cfg.engine==='yolo26'||cfg.engine==='auto'){
         if(cfg.yoloUrl){
-          try{await this.yolo.loadUrl(cfg.yoloUrl);return;}catch(e){this.log(`YOLO URL load failed: ${e.message}`);}
+          try{await this.yolo.loadUrl(cfg.yoloUrl);return;}catch(e){this.detectorError=e.message;this.log(`YOLO URL load failed: ${e.message}`);}
         }
-        try{if(await this.yolo.loadCached()) return;}catch(e){this.log(`Cached YOLO load failed: ${e.message}`);}
+        try{if(await this.yolo.loadCached()) return;}catch(e){this.detectorError=e.message;this.log(`Cached YOLO load failed: ${e.message}`);}
+        if(cfg.engine==='yolo26') throw new Error(this.detectorError||'Fortnite model not loaded. Pick weights-3.onnx in AI MODEL.');
       }
-      await this.loader.ensure();
-      await this.vision.loadModel();
+      try{await this.loader.ensure();await this.vision.loadModel();this.detectorError='';}
+      catch(e){this.detectorError=e.message;throw e;}
     }
     async waitForVideo(){for(let i=0;i<180&&this.running;i++){const v=this.locator.find();if(v){this.metrics.start(v);this.toast('xCloud stream attached');return v;}await sleep(500);}this.log('No live video found yet; continuing discovery in loop.');return null;}
     loop=async()=>{
