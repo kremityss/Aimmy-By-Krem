@@ -2,7 +2,7 @@
 // @name         Aimmy By Krem — Raven Edition
 // @namespace    https://github.com/kremityss/Aimmy-By-Krem
 // @version      1.0.0
-// @description  Raven-branded local vision/control dashboard for Xbox Cloud Gaming with desktop, touch, controller, and ESP32-S3 adapters.
+// @description  Raven-branded local vision/control dashboard for Xbox Cloud Gaming with desktop, touch, controller, and optional ESP32-S3 support.
 // @author       Kremityss
 // @match        https://www.xbox.com/*/play/*
 // @match        https://www.xbox.com/play/*
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const BUILD = '1.0.0';
+  const BUILD = '1.0.1';
   const NS = '__RAVEN_AIMMY__';
   if (window[NS]?.destroy) window[NS].destroy();
 
@@ -84,7 +84,7 @@
           hud: true
         },
         input: {
-          adapter: 'auto',
+          adapter: 'pointer',
           mouseGain: 1,
           controllerGain: 1,
           touchGain: 1,
@@ -459,8 +459,21 @@
     }
     resolveAdapter() {
       const selected = this.app.store.data.input.adapter;
-      if (selected !== 'auto') return selected;
-      if (this.app.store.data.esp32.enabled && this.app.bridge.connected) return 'esp32';
+
+      // Browser/local input is always the safe fallback. ESP32 is an optional
+      // accelerator/output bridge and must never be required for Raven to run.
+      if (selected === 'esp32') {
+        return this.app.store.data.esp32.enabled && this.app.bridge.connected
+          ? 'esp32'
+          : 'pointer';
+      }
+
+      if (selected === 'auto') {
+        return this.app.store.data.esp32.enabled && this.app.bridge.connected
+          ? 'esp32'
+          : 'pointer';
+      }
+
       return 'pointer';
     }
     pointerDelta(dx,dy) {
@@ -632,7 +645,7 @@
       await this.loader.ensure();
       await this.vision.loadModel();
       await this.waitForVideo();
-      if(this.store.data.esp32.enabled)this.bridge.connect();
+      if(this.store.data.esp32.enabled) this.bridge.connect();
       this.loop();
     }
     async waitForVideo(){for(let i=0;i<180&&this.running;i++){const v=this.locator.find();if(v){this.metrics.start(v);this.toast('xCloud stream attached');return v;}await sleep(500);}this.log('No live video found yet; continuing discovery in loop.');return null;}
