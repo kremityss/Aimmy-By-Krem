@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Aimmy By Krem — Raven Edition
 // @namespace    https://github.com/kremityss/Aimmy-By-Krem
-// @version      1.1.2
+// @version      1.2.0
 // @description  Raven-branded local vision/control dashboard for Xbox Cloud Gaming with desktop, touch, controller, and optional ESP32-S3 support.
 // @author       Kremityss
 // @match        https://www.xbox.com/*/play/*
 // @match        https://www.xbox.com/play/*
 // @match        https://xbox.com/*/play/*
+// @require      https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.js
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -14,7 +15,7 @@
 (() => {
   'use strict';
 
-  const BUILD = '1.1.2';
+  const BUILD = '1.2.0';
   const NS = '__RAVEN_AIMMY__';
   if (window[NS]?.destroy) window[NS].destroy();
 
@@ -41,7 +42,7 @@
 
   class RavenStore {
     constructor() {
-      this.key = 'ravenAimmy.v2';
+      this.key = 'ravenAimmy.v3';
       this.defaults = {
         ui: { open: true, scale: 1, opacity: .96, compactHud: true, autoScale: true },
         aim: {
@@ -65,17 +66,17 @@
           engine: 'auto',
           model: 'lightning',
           yoloUrl: '',
-          yoloConfidence: .32,
+          yoloConfidence: .12,
           yoloIou: .45,
           yoloInputSize: 640,
           backend: 'auto',
           minScore: .16,
           keypointScore: .16,
-          intervalMs: 12,
+          intervalMs: 0,
           maxPoses: 1,
           crop: 'video',
           adaptive: true,
-          targetFps: 24
+          targetFps: 45
         },
         visuals: {
           enabled: true,
@@ -197,14 +198,24 @@
       this.log('Pose runtime ready');
     }
     async ensureOrt() {
-      if (window.ort) return;
-      this.log('Loading ONNX Runtime Web');
-      await this.loadScript(CDN.ort, () => !!window.ort);
+      if (!window.ort) {
+        this.log('Loading ONNX Runtime Web');
+        await this.loadScript(CDN.ort, () => !!window.ort);
+      }
       try {
-        ort.env.wasm.numThreads = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
-        ort.env.wasm.simd = true;
-      } catch {}
-      this.log('ONNX runtime ready');
+        const base='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/';
+        ort.env.logLevel='warning';
+        ort.env.wasm.wasmPaths=base;
+        ort.env.wasm.simd=true;
+        ort.env.wasm.numThreads=crossOriginIsolated
+          ? Math.max(1,Math.min(4,(navigator.hardwareConcurrency||2)-1))
+          : 1;
+        if (ort.env.webgpu) {
+          ort.env.webgpu.powerPreference='high-performance';
+          ort.env.webgpu.validateInputContent=false;
+        }
+      } catch(e) { this.log(`ORT env setup: ${e.message}`); }
+      this.log(`ONNX Runtime ready ${ort.env?.versions?.web||''}`.trim());
     }
   }
 
@@ -369,40 +380,75 @@
       this.lastTransform = null;
       this.cacheDb = 'ravenAimmyModels';
       this.cacheKey = 'fortnite-primary';
+      this.status = 'idle';
+      this.lastError = '';
+      this.providerAttempts = [];
+      this.dynamicFpsCap = 60;
+      this.warmupMs = 0;
     }
     get inferenceMs() { return this.inferAvg.value; }
     get modelFps() { return this.fpsAvg.value; }
     async load(source, name='Fortnite YOLO11n') {
       if (!source) throw new Error('Choose a Fortnite ONNX model file or URL first');
+      this.status='loading'; this.lastError=''; this.providerAttempts=[];
       await this.app.loader.ensureOrt();
       if (this.objectUrl) { try { URL.revokeObjectURL(this.objectUrl); } catch {} this.objectUrl=null; }
-      this.ready=false; this.session=null; this.detections=[]; this.lastBox=null;
-      const providers = this.app.device.webgpu ? [['webgpu'], ['wasm']] : [['wasm']];
-      let lastError = null;
-      for (const executionProviders of providers) {
-        try {
-          this.session = await ort.InferenceSession.create(source, {
-            executionProviders,
-            graphOptimizationLevel: 'all'
-          });
-          this.backend = executionProviders[0];
-          break;
-        } catch (e) { lastError=e; this.app.log(`YOLO provider ${executionProviders[0]} failed: ${e.message}`); }
+      this.ready=false; this.session=null; this.backend='none'; this.detections=[]; this.lastBox=null;
+
+      const plans=[];
+      if (this.app.device.webgpu) {
+        const webgpu={name:'webgpu',preferredLayout:'NCHW',validationMode:'disabled',storageBufferCacheMode:'simple',uniformBufferCacheMode:'simple'};
+        plans.push({label:'webgpu+capture',backend:'webgpu',options:{executionProviders:[webgpu,'wasm'],graphOptimizationLevel:'all',enableGraphCapture:true}});
+        plans.push({label:'webgpu',backend:'webgpu',options:{executionProviders:[webgpu,'wasm'],graphOptimizationLevel:'all'}});
       }
-      if (!this.session) throw lastError || new Error('Fortnite ONNX session failed to load');
+      plans.push({label:'wasm',backend:'wasm',options:{executionProviders:['wasm'],graphOptimizationLevel:'all'}});
+
+      let lastError=null;
+      for (const plan of plans) {
+        try {
+          this.status=`loading:${plan.label}`;
+          this.session=await ort.InferenceSession.create(source,plan.options);
+          this.backend=plan.backend;
+          this.providerAttempts.push(`${plan.label}:ok`);
+          break;
+        } catch(e) {
+          lastError=e;
+          this.providerAttempts.push(`${plan.label}:fail`);
+          this.app.log(`YOLO ${plan.label} failed: ${e.message}`);
+        }
+      }
+
+      if (!this.session) {
+        this.status='error';
+        this.lastError=lastError?.message||'Fortnite ONNX session failed to load';
+        throw lastError||new Error(this.lastError);
+      }
+
       this.inputName=this.session.inputNames[0];
       this.outputName=this.session.outputNames[0];
       const meta=this.session.inputMetadata?.[this.inputName];
       const dims=meta?.dimensions || meta?.dims || [];
       const fixedH=Number(dims?.[2]), fixedW=Number(dims?.[3]);
-      if (Number.isFinite(fixedH) && fixedH>0 && fixedH===fixedW) this.inputSize=fixedH;
-      else this.inputSize=640;
-      if (this.inputSize !== 640) this.app.log(`Model input is ${this.inputSize}x${this.inputSize}; uploaded Fortnite model is expected to be fixed 640x640`);
+      this.inputSize=(Number.isFinite(fixedH)&&fixedH>0&&fixedH===fixedW)?fixedH:640;
       this.canvas.width=this.inputSize; this.canvas.height=this.inputSize;
+      this.ctx.imageSmoothingEnabled=true;
+      this.ctx.imageSmoothingQuality='low';
       this.modelName=name;
       this.sourceName=name;
+      this.inferAvg.clear(); this.fpsAvg.clear(); this.dynamicFpsCap=60;
+
+      try {
+        this.status='warming';
+        const warm=new ort.Tensor('float32',new Float32Array(3*this.inputSize*this.inputSize),[1,3,this.inputSize,this.inputSize]);
+        const wt=now();
+        await this.session.run({[this.inputName]:warm});
+        this.warmupMs=now()-wt;
+      } catch(e) {
+        this.app.log(`YOLO warmup skipped: ${e.message}`);
+      }
+
       this.ready=true;
-      this.inferAvg.clear(); this.fpsAvg.clear();
+      this.status='ready';
       this.app.toast(`${name} • ${this.backend.toUpperCase()}`);
       this.app.ui?.render();
     }
@@ -443,7 +489,7 @@
       const dw=Math.round(vw*scale), dh=Math.round(vh*scale);
       const px=Math.floor((n-dw)/2), py=Math.floor((n-dh)/2);
       const c=this.ctx;
-      c.save(); c.fillStyle='#000'; c.fillRect(0,0,n,n); c.drawImage(video,0,0,vw,vh,px,py,dw,dh); c.restore();
+      c.save(); c.fillStyle='rgb(114,114,114)'; c.fillRect(0,0,n,n); c.drawImage(video,0,0,vw,vh,px,py,dw,dh); c.restore();
       this.lastTransform={scale,px,py,vw,vh};
       const imageData=c.getImageData(0,0,n,n);
       if (ort.Tensor?.fromImage) {
@@ -520,7 +566,9 @@
     async run(video) {
       if(!this.ready||this.busy||!video) return null;
       const cfg=this.app.store.data.vision,t=now();
-      const minInterval=Math.max(cfg.intervalMs,1000/clamp(cfg.targetFps,6,this.app.device.mobile?30:60));
+      const requested=clamp(cfg.targetFps,6,60);
+      const effective=Math.max(6,Math.min(requested,this.dynamicFpsCap));
+      const minInterval=Math.max(cfg.intervalMs,1000/effective);
       if(t-this.lastRun<minInterval) return null;
       if(document.hidden&&this.app.store.data.perf.suspendWhenHidden) return null;
       this.lastRun=t; this.busy=true;
@@ -530,13 +578,15 @@
         const outputs=await this.session.run({[this.inputName]:input});
         const elapsed=now()-start;
         this.inferAvg.push(elapsed);
+        const sustainable=clamp(Math.floor(1000/Math.max(1,elapsed+2)),6,60);
+        this.dynamicFpsCap=lerp(this.dynamicFpsCap,sustainable,.18);
         if(this.lastFinish)this.fpsAvg.push(1000/Math.max(1,now()-this.lastFinish));
         this.lastFinish=now();
         const tensor=outputs[this.outputName]||outputs[Object.keys(outputs)[0]];
         this.detections=this.parse(tensor);
         this.lastBox=this.bestDetection()||this.detections[0]||null;
         return this.detections;
-      }catch(e){this.app.log(`YOLO inference: ${e.message}`);return null;}
+      }catch(e){this.lastError=e.message;this.status='error';this.app.log(`YOLO inference: ${e.message}`);return null;}
       finally{this.busy=false;}
     }
     aimPoint(box) {
@@ -555,7 +605,7 @@
       },null)?.box||null;
     }
     targetPoint() { return this.aimPoint(this.bestDetection()); }
-    dispose() { try{this.session?.release?.();}catch{} this.session=null;this.ready=false;this.detections=[]; }
+    dispose() { try{this.session?.release?.();}catch{} this.session=null;this.ready=false;this.status='idle';this.detections=[]; }
   }
 
   class StreamMetrics {
