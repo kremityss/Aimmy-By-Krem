@@ -23,14 +23,14 @@ The current build uses single-pose inference because the xCloud crosshair workfl
 The detector is guarded against overlapping inference. Measured inference latency is fed into an adaptive interval so slower devices back off rather than building a queue of stale frames. Faster devices can run without an artificial interval.
 
 ## Inputs
-Raven has an input router instead of one hard-coded mouse simulator.
+Raven has an input router instead of one hard-coded mouse simulator. The browser pointer adapter is the default and does not require external hardware.
 
 - Browser pointer adapter
 - Touch activation on the right-hand camera region
 - Gamepad trigger activation through Gamepad API
-- ESP32-S3 WebSocket output adapter
+- ESP32-S3 WebSocket output adapter (optional)
 
-Browser-dispatched events are synthetic. Some sites/browsers ignore or treat them differently from trusted hardware input. The ESP32-S3 route exists for setups that need a physical USB HID endpoint.
+Browser-dispatched events are synthetic. Some sites/browsers ignore or treat them differently from trusted hardware input. Raven still starts and operates without ESP32 hardware; if an ESP32 adapter is selected but unavailable, the runtime falls back to the browser pointer adapter. The ESP32-S3 route only exists for setups that specifically want a physical USB HID endpoint.
 
 ## ESP32-S3
 `esp32s3/RavenLink_ESP32S3.ino` starts a Wi-Fi AP named `RavenLink-S3`, a WebSocket server on port `7878`, and a native USB HID mouse.
