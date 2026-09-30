@@ -1,6 +1,6 @@
 # Aimmy By Krem — Raven Edition
 
-Cross-device xCloud vision/control userscript rebuilt for Krem.
+Cross-device xCloud vision/control userscript rebuilt for Krem. **No ESP32-S3 is required.** Browser/local input is the default path; RavenLink hardware is optional.
 
 ## Targets
 - Windows / Chrome / Edge
@@ -10,7 +10,7 @@ Cross-device xCloud vision/control userscript rebuilt for Krem.
 - Desktop keyboard + mouse
 - Touch
 - Gamepad/controller telemetry
-- ESP32-S3 RavenLink bridge
+- Optional ESP32-S3 RavenLink bridge
 
 ## Runtime
 The browser build runs inference locally on the device. It selects the fastest available TensorFlow.js backend in this order:
@@ -33,7 +33,7 @@ The old Aimmy UI is not used. Raven Edition has:
 - Device
 - Settings
 
-The HUD reports measured stream FPS, model FPS, inference latency, selected backend, device capabilities, thermal/performance hints, and bridge state.
+The HUD reports measured stream FPS, model FPS, inference latency, selected backend, device capabilities, and bridge state. If no ESP32 is connected, Raven continues on the local browser input adapter automatically.
 
 ## Files
 - `RavenAimmy.user.js` — self-contained production userscript
