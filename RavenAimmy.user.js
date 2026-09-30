@@ -583,4 +583,49 @@
     }
     bindCurrent(){const s=this.app.store.data;
       [['masterAim',s.aim,'enabled'],['aimEnabled',s.aim,'enabled'],['masterVision',s.vision,'enabled'],['visionEnabled',s.vision,'enabled'],['masterVisuals',s.visuals,'enabled'],['visualEnabled',s.visuals,'enabled'],['adaptive',s.vision,'adaptive'],['adaptive2',s.vision,'adaptive'],['boxes',s.visuals,'boxes'],['skel',s.visuals,'skeleton'],['points',s.visuals,'keypoints'],['fovvis',s.visuals,'fov'],['tline',s.visuals,'targetLine'],['rgb',s.visuals,'rgb'],['invertY',s.input,'invertY'],['espEnabled',s.esp32,'enabled'],['highperf',s.perf,'highPerformance'],['suspend',s.perf,'suspendWhenHidden']].forEach(x=>this.bindToggle(...x,x[0]==='espEnabled'?v=>v?this.app.bridge.connect():this.app.bridge.disconnect():null));
-      [['fov',s.aim,'fov',v=>`${v|0} px`],['smooth',s.aim,'smoothing',v=>v.toFixed(2)],['maxstep',s.aim,'maxStep',v=>`${v|0} px`],['deadzone',s.aim,'deadzone',v=>`${v.toFixed(1)} px`],['pred',s.aim,'predictionMs',v=>`${v|0} ms`],
+      [['fov',s.aim,'fov',v=>`${v|0} px`],['smooth',s.aim,'smoothing',v=>v.toFixed(2)],['maxstep',s.aim,'maxStep',v=>`${v|0} px`],['deadzone',s.aim,'deadzone',v=>`${v.toFixed(1)} px`],['pred',s.aim,'predictionMs',v=>`${v|0} ms`],['score',s.vision,'minScore',v=>v.toFixed(2)],['kpscore',s.vision,'keypointScore',v=>v.toFixed(2)],['targetfps',s.vision,'targetFps',v=>`${v|0} fps`],['linewidth',s.visuals,'lineWidth',v=>`${v.toFixed(1)} px`],['mousegain',s.input,'mouseGain',v=>`${v.toFixed(2)}×`],['controllergain',s.input,'controllerGain',v=>`${v.toFixed(2)}×`],['touchgain',s.input,'touchGain',v=>`${v.toFixed(2)}×`],['esphz',s.esp32,'sendHz',v=>`${v|0} Hz`],['overlayfps',s.perf,'overlayFps',v=>`${v|0} fps`]].forEach(x=>this.bindRange(...x));
+      this.bindSelect('activation',s.aim,'activation');this.bindSelect('aimTarget',s.aim,'target');this.bindSelect('adapter',s.input,'adapter');
+      this.bindSelect('model',s.vision,'model',()=>this.app.vision.loadModel(true)); this.bindSelect('backend',s.vision,'backend',()=>this.app.vision.loadModel(true));
+      const rm=this.shadow.getElementById('reloadModel');if(rm)rm.onclick=()=>this.app.vision.loadModel(true);
+      const url=this.shadow.getElementById('espurl');if(url)url.onchange=()=>{s.esp32.url=url.value.trim();this.app.store.save();};
+      const ec=this.shadow.getElementById('espConnect');if(ec)ec.onclick=()=>this.app.bridge.connect(); const ep=this.shadow.getElementById('espPing');if(ep)ep.onclick=()=>this.app.bridge.ping();
+      const reset=this.shadow.getElementById('reset');if(reset)reset.onclick=()=>{this.app.store.reset();this.app.toast('Settings reset');this.render();};
+      const destroy=this.shadow.getElementById('destroy');if(destroy)destroy.onclick=()=>this.app.destroy();
+    }
+    renderStatus(){const a=this.app;const b=this.shadow.querySelector('.backend');if(b)b.textContent=`${a.vision.backend.toUpperCase()} • ${a.vision.modelFps.toFixed(0)} FPS`;const bs=this.shadow.querySelector('.bridge-state');if(bs)bs.textContent=a.bridge.connected?'ESP32 ONLINE':'LOCAL';const dot=this.shadow.querySelector('.dot');if(dot)dot.style.background=a.vision.detector?'#4cff7a':'#ffb84c';const set=(q,v)=>{const e=this.shadow.querySelector(q);if(e)e.textContent=v};set('.m-model',a.vision.modelFps.toFixed(1));set('.m-ms',`${a.vision.inferenceMs.toFixed(1)} ms`);set('.m-stream',a.metrics.streamFps.toFixed(0));set('.s-model',a.vision.modelName);set('.s-backend',a.vision.backend);set('.s-input',a.input.resolveAdapter());set('.s-bridge',a.bridge.connected?'Connected':'Offline');set('.s-controller',a.controllerName);}
+    destroy(){clearInterval(this.statusTimer);this.host.remove();}
+  }
+
+  class RavenApp {
+    constructor(){this.running=true;this.store=new RavenStore();this.logs=[];this.device=null;this.controllerName='None';this.locator=new VideoLocator();this.loader=new LibraryLoader(m=>this.log(m));this.vision=new VisionRuntime(this);this.bridge=new RavenBridge(this);this.activation=null;this.input=null;this.metrics=new StreamMetrics(this);this.overlay=null;this.ui=null;this.loopHandle=0;this.lastOverlay=0;}
+    log(m){this.logs.push({t:Date.now(),m});if(this.logs.length>100)this.logs.shift();console.info('[Raven]',m);}
+    toast(m){this.ui?.toast(m);}
+    async boot(){
+      this.device=await DeviceProfile.detect();
+      this.activation=new ActivationState(this);
+      this.input=new InputRouter(this);
+      this.overlay=new Overlay(this);
+      this.ui=new RavenUI(this);
+      this.toast(`Raven ${BUILD} • ${this.device.label}`);
+      await this.loader.ensure();
+      await this.vision.loadModel();
+      await this.waitForVideo();
+      if(this.store.data.esp32.enabled)this.bridge.connect();
+      this.loop();
+    }
+    async waitForVideo(){for(let i=0;i<180&&this.running;i++){const v=this.locator.find();if(v){this.metrics.start(v);this.toast('xCloud stream attached');return v;}await sleep(500);}this.log('No live video found yet; continuing discovery in loop.');return null;}
+    loop=async()=>{
+      if(!this.running)return;
+      let video=this.locator.video;
+      if(!video||!document.contains(video)||video.readyState<2){const old=video;video=this.locator.find();if(video&&video!==old)this.metrics.start(video);}
+      if(video&&this.vision.detector){const pose=await this.vision.run(video);if(pose){const target=this.vision.targetPoint(pose);if(target)await this.input.apply(target);}}
+      const t=now(), cap=clamp(this.store.data.perf.overlayFps,15,120);if(t-this.lastOverlay>=1000/cap){this.lastOverlay=t;this.overlay.draw();}
+      this.loopHandle=requestAnimationFrame(this.loop);
+    }
+    destroy(){if(!this.running)return;this.running=false;cancelAnimationFrame(this.loopHandle);this.metrics.stop();this.bridge.disconnect();this.input?.destroy();this.activation?.destroy();this.overlay?.destroy();this.ui?.destroy();try{this.vision.detector?.dispose?.();}catch{}delete window[NS];console.info('[Raven] Unloaded');}
+  }
+
+  const app=new RavenApp();
+  window[NS]=app;
+  app.boot().catch(e=>{console.error('[Raven] Boot failed',e);app.toast?.(`Boot failed: ${e.message}`);});
+})();
