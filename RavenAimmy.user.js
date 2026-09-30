@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Aimmy By Krem — Raven Edition
 // @namespace    https://github.com/kremityss/Aimmy-By-Krem
-// @version      1.1.0
+// @version      1.1.1
 // @description  Raven-branded local vision/control dashboard for Xbox Cloud Gaming with desktop, touch, controller, and optional ESP32-S3 support.
 // @author       Kremityss
 // @match        https://www.xbox.com/*/play/*
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
 
-  const BUILD = '1.1.0';
+  const BUILD = '1.1.1';
   const NS = '__RAVEN_AIMMY__';
   if (window[NS]?.destroy) window[NS].destroy();
 
@@ -22,7 +22,7 @@
     tf: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
     webgpu: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgpu@4.22.0/dist/tf-backend-webgpu.min.js',
     pose: 'https://cdn.jsdelivr.net/npm/@tensorflow-models/pose-detection@2.1.3/dist/pose-detection.min.js',
-    ort: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.min.js'
+    ort: 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.30.0/dist/ort.webgpu.min.js'
   };
 
   const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
@@ -351,7 +351,7 @@
       this.session = null;
       this.ready = false;
       this.busy = false;
-      this.modelName = 'YOLO26 • not loaded';
+      this.modelName = 'Fortnite YOLO11n • not loaded';
       this.backend = 'none';
       this.inputName = null;
       this.outputName = null;
@@ -370,7 +370,7 @@
     }
     get inferenceMs() { return this.inferAvg.value; }
     get modelFps() { return this.fpsAvg.value; }
-    async load(source, name='Fortnite YOLO26') {
+    async load(source, name='Fortnite YOLO11n') {
       if (!source) throw new Error('Choose a YOLO26 ONNX model file or URL first');
       await this.app.loader.ensureOrt();
       if (this.objectUrl) { try { URL.revokeObjectURL(this.objectUrl); } catch {} this.objectUrl=null; }
@@ -394,7 +394,8 @@
       const dims=meta?.dimensions || meta?.dims || [];
       const fixedH=Number(dims?.[2]), fixedW=Number(dims?.[3]);
       if (Number.isFinite(fixedH) && fixedH>0 && fixedH===fixedW) this.inputSize=fixedH;
-      else this.inputSize=clamp(this.app.store.data.vision.yoloInputSize || (this.app.device.mobile?416:640),320,640);
+      else this.inputSize=640;
+      if (this.inputSize !== 640) this.app.log(`Model input is ${this.inputSize}x${this.inputSize}; uploaded Fortnite model is expected to be fixed 640x640`);
       this.canvas.width=this.inputSize; this.canvas.height=this.inputSize;
       this.modelName=name;
       this.sourceName=name;
@@ -411,9 +412,9 @@
     async loadUrl(url) {
       const clean=(url||'').trim();
       if (!clean) throw new Error('YOLO URL is empty');
-      await this.load(clean, 'Fortnite YOLO26');
+      await this.load(clean, 'Fortnite YOLO11n');
     }
-    preprocess(video) {
+    async preprocess(video) {
       const n=this.inputSize;
       const vw=video.videoWidth, vh=video.videoHeight;
       const scale=Math.min(n/vw,n/vh);
@@ -421,14 +422,18 @@
       const px=Math.floor((n-dw)/2), py=Math.floor((n-dh)/2);
       const c=this.ctx;
       c.save(); c.fillStyle='#000'; c.fillRect(0,0,n,n); c.drawImage(video,0,0,vw,vh,px,py,dw,dh); c.restore();
-      const rgba=c.getImageData(0,0,n,n).data;
-      const area=n*n, data=new Float32Array(area*3);
-      for(let i=0,j=0;i<area;i++,j+=4){
-        data[i]=rgba[j]/255;
-        data[area+i]=rgba[j+1]/255;
-        data[area*2+i]=rgba[j+2]/255;
-      }
       this.lastTransform={scale,px,py,vw,vh};
+      const imageData=c.getImageData(0,0,n,n);
+      if (ort.Tensor?.fromImage) {
+        return await ort.Tensor.fromImage(imageData,{
+          tensorFormat:'RGB',
+          tensorLayout:'NCHW',
+          dataType:'float32',
+          norm:{mean:255,bias:0}
+        });
+      }
+      const rgba=imageData.data, area=n*n, data=new Float32Array(area*3);
+      for(let i=0,j=0;i<area;i++,j+=4){data[i]=rgba[j]/255;data[area+i]=rgba[j+1]/255;data[area*2+i]=rgba[j+2]/255;}
       return new ort.Tensor('float32',data,[1,3,n,n]);
     }
     toVideoBox(x1,y1,x2,y2,score,classId) {
@@ -461,7 +466,9 @@
           const b=this.toVideoBox(d[o],d[o+1],d[o+2],d[o+3],score,Math.round(d[o+5]));
           if(b) out.push(b);
         }
-        return this.nms(out,this.app.store.data.vision.yoloIou);
+        // This Fortnite export reports output0 [1,300,6] with export-time NMS enabled.
+        // Do not run a second NMS pass in JavaScript.
+        return out;
       }
       if(dims.length===3 && dims[1]<dims[2]){
         const channels=dims[1], count=dims[2], classes=channels-4;
@@ -497,7 +504,7 @@
       this.lastRun=t; this.busy=true;
       const start=now();
       try{
-        const input=this.preprocess(video);
+        const input=await this.preprocess(video);
         const outputs=await this.session.run({[this.inputName]:input});
         const elapsed=now()-start;
         this.inferAvg.push(elapsed);
@@ -857,7 +864,7 @@
       const select=(id,label,val,opts)=>`<div class="row"><label>${label}</label><select id="${id}">${opts.map(o=>`<option value="${o[0]}" ${o[0]===val?'selected':''}>${o[1]}</option>`).join('')}</select></div>`;
       if(this.activeTab==='Dashboard') c.innerHTML=`<div class="grid"><div class="card third"><h3>MODEL FPS</h3><div class="metric m-model">${a.activeVision.modelFps.toFixed(1)}</div><div class="muted">local inference</div></div><div class="card third"><h3>INFERENCE</h3><div class="metric m-ms">${a.activeVision.inferenceMs.toFixed(1)} ms</div><div class="muted">rolling average</div></div><div class="card third"><h3>STREAM FPS</h3><div class="metric m-stream">${a.metrics.streamFps.toFixed(0)}</div><div class="muted">video callback</div></div><div class="card full"><h3>SESSION</h3><div class="statline"><span>Vision model</span><span class="s-model">${a.activeVision.modelName}</span></div><div class="statline"><span>Backend</span><span class="s-backend">${a.activeVision.backend}</span></div><div class="statline"><span>Input adapter</span><span class="s-input">${a.input.resolveAdapter()}</span></div><div class="statline"><span>ESP32-S3</span><span class="s-bridge">${a.bridge.connected?'Connected':'Offline'}</span></div><div class="statline"><span>Controller</span><span class="s-controller">${a.controllerName}</span></div></div><div class="card full"><h3>MASTER</h3>${toggle('masterAim','Aim engine',s.aim.enabled)}${toggle('masterVision','Vision engine',s.vision.enabled)}${toggle('masterVisuals','Overlay',s.visuals.enabled)}</div></div>`;
       if(this.activeTab==='Aim') c.innerHTML=`<div class="grid"><div class="card full"><h3>AIM ENGINE</h3>${toggle('aimEnabled','Enabled',s.aim.enabled)}${select('activation','Activation',s.aim.activation,[['hold','Hold input'],['toggle','Toggle (F8)'],['always','Always']])}${select('aimTarget','Aim point',s.aim.target,[['head','Head'],['chest','Chest'],['hip','Hip']])}${range('fov','FOV radius',s.aim.fov,40,380,1,' px')}${range('smooth','Smoothing',s.aim.smoothing,.02,1,.01,'')}${range('maxstep','Max step',s.aim.maxStep,2,80,1,' px')}${range('deadzone','Deadzone',s.aim.deadzone,0,20,.5,' px')}${range('pred','Prediction',s.aim.predictionMs,0,150,1,' ms')}</div></div>`;
-      if(this.activeTab==='Vision') c.innerHTML=`<div class="grid"><div class="card full"><h3>AI DETECTOR</h3>${toggle('visionEnabled','Detector enabled',s.vision.enabled)}${select('engine','Detection engine',s.vision.engine,[['auto','Auto • YOLO26 first'],['yolo26','YOLO26 Fortnite'],['pose','MoveNet fallback']])}<div class="row"><label>YOLO26 ONNX URL</label><input id="yolourl" type="text" value="${s.vision.yoloUrl||''}" placeholder="raw .onnx URL"></div><div class="row"><label>Local YOLO26 model</label><input id="yolofile" type="file" accept=".onnx,application/octet-stream"></div>${range('yoloconf','YOLO confidence',s.vision.yoloConfidence,.05,.9,.01,'')}${range('yoloiou','YOLO NMS IoU',s.vision.yoloIou,.1,.9,.01,'')}${select('model','Pose fallback',s.vision.model,[['lightning','MoveNet Lightning • fast'],['thunder','MoveNet Thunder • quality']])}${select('backend','Pose backend',s.vision.backend,[['auto','Auto • WebGPU first'],['webgpu','WebGPU'],['webgl','WebGL'],['cpu','CPU']])}${range('score','Minimum pose score',s.vision.minScore,.05,.9,.01,'')}${range('kpscore','Keypoint score',s.vision.keypointScore,.05,.9,.01,'')}${toggle('adaptive','Adaptive inference scheduler',s.vision.adaptive)}${range('targetfps','Target model FPS',s.vision.targetFps,6,60,1,' fps')}<div class="row"><button class="btn primary" id="loadYolo">LOAD YOLO26</button><button class="btn" id="reloadModel">LOAD POSE FALLBACK</button></div><div class="statline"><span>Active model</span><span>${a.activeVision.modelName}</span></div><div class="statline"><span>Runtime</span><span>${a.activeVision.backend}</span></div><div class="statline"><span>Detections</span><span>${a.yolo.ready?a.yolo.detections.length:(a.vision.lastPose?1:0)}</span></div></div></div>`;
+      if(this.activeTab==='Vision') c.innerHTML=`<div class="grid"><div class="card full"><h3>AI DETECTOR</h3>${toggle('visionEnabled','Detector enabled',s.vision.enabled)}${select('engine','Detection engine',s.vision.engine,[['auto','Auto • Fortnite YOLO first'],['yolo26','Fortnite YOLO11n'],['pose','MoveNet fallback']])}<div class="row"><label>Fortnite ONNX URL</label><input id="yolourl" type="text" value="${s.vision.yoloUrl||''}" placeholder="raw .onnx URL"></div><div class="row"><label>Local Fortnite model</label><input id="yolofile" type="file" accept=".onnx,application/octet-stream"></div>${range('yoloconf','YOLO confidence',s.vision.yoloConfidence,.05,.9,.01,'')}${range('yoloiou','YOLO NMS IoU',s.vision.yoloIou,.1,.9,.01,'')}${select('model','Pose fallback',s.vision.model,[['lightning','MoveNet Lightning • fast'],['thunder','MoveNet Thunder • quality']])}${select('backend','Pose backend',s.vision.backend,[['auto','Auto • WebGPU first'],['webgpu','WebGPU'],['webgl','WebGL'],['cpu','CPU']])}${range('score','Minimum pose score',s.vision.minScore,.05,.9,.01,'')}${range('kpscore','Keypoint score',s.vision.keypointScore,.05,.9,.01,'')}${toggle('adaptive','Adaptive inference scheduler',s.vision.adaptive)}${range('targetfps','Target model FPS',s.vision.targetFps,6,60,1,' fps')}<div class="row"><button class="btn primary" id="loadYolo">LOAD FORTNITE MODEL</button><button class="btn" id="reloadModel">LOAD POSE FALLBACK</button></div><div class="statline"><span>Active model</span><span>${a.activeVision.modelName}</span></div><div class="statline"><span>Runtime</span><span>${a.activeVision.backend}</span></div><div class="statline"><span>Detections</span><span>${a.yolo.ready?a.yolo.detections.length:(a.vision.lastPose?1:0)}</span></div></div></div>`;
       if(this.activeTab==='Visuals') c.innerHTML=`<div class="grid"><div class="card full"><h3>OVERLAY</h3>${toggle('visualEnabled','Enabled',s.visuals.enabled)}${toggle('boxes','Corner boxes',s.visuals.boxes)}${toggle('skel','Skeleton',s.visuals.skeleton)}${toggle('points','Keypoints',s.visuals.keypoints)}${toggle('fovvis','FOV circle',s.visuals.fov)}${toggle('tline','Target line',s.visuals.targetLine)}${toggle('rgb','RGB accent',s.visuals.rgb)}${range('linewidth','Line width',s.visuals.lineWidth,.5,4,.1,' px')}</div></div>`;
       if(this.activeTab==='Input') c.innerHTML=`<div class="grid"><div class="card full"><h3>INPUT ROUTER</h3>${select('adapter','Output adapter',s.input.adapter,[['auto','Auto'],['pointer','Browser pointer'],['esp32','ESP32-S3']])}${range('mousegain','Mouse gain',s.input.mouseGain,.1,3,.05,'×')}${range('controllergain','Controller gain',s.input.controllerGain,.1,3,.05,'×')}${range('touchgain','Touch gain',s.input.touchGain,.1,3,.05,'×')}${toggle('invertY','Invert Y',s.input.invertY)}${toggle('mobileTouch','Mobile touch assist',s.input.mobileTouch)}${toggle('touchHold','Touch hold activation',s.aim.touchHold)}${range('touchstrength','Touch assist strength',s.input.touchAssistStrength,.05,1,.05,'')}${range('controllerbtn','Controller aim button',s.aim.controllerButton,0,16,1,'') }<div class="statline"><span>Detected controller</span><span>${a.controllerName}</span></div><div class="statline"><span>Touch</span><span>${a.device.touch?'Yes':'No'}</span></div><div class="muted">Activation supports right mouse hold, controller trigger button index ${s.aim.controllerButton}, touch hold on the right side, F8 toggle, or always-on mode.</div></div></div>`;
       if(this.activeTab==='ESP32-S3') c.innerHTML=`<div class="grid"><div class="card full"><h3>RAVENLINK</h3>${toggle('espEnabled','Enable bridge',s.esp32.enabled)}<div class="row"><label>WebSocket URL</label><input id="espurl" type="text" value="${s.esp32.url}"></div>${range('esphz','Send rate',s.esp32.sendHz,20,240,1,' Hz')}<div class="row"><button class="btn primary" id="espConnect">CONNECT</button><button class="btn" id="espPing">PING</button><span class="muted">${a.bridge.connected?'ONLINE':'OFFLINE'}${a.bridge.latency!=null?` • ${a.bridge.latency.toFixed(1)} ms`:''}</span></div><div class="muted">Wi-Fi/WebSocket is the portable browser path. iOS browsers do not expose the same USB/BLE browser APIs as desktop Chromium, so RavenLink uses network transport here.</div></div></div>`;
